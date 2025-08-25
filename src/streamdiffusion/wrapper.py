@@ -1113,6 +1113,7 @@ class StreamDiffusionWrapper:
                     mode=self.mode,
                     use_lcm_lora=use_lcm_lora,
                     use_tiny_vae=use_tiny_vae,
+                    lora_dict=lora_dict,
                     ipadapter_scale=ipadapter_scale,
                     ipadapter_tokens=ipadapter_tokens,
                     is_faceid=is_faceid if use_ipadapter_trt else None
@@ -1125,6 +1126,7 @@ class StreamDiffusionWrapper:
                     mode=self.mode,
                     use_lcm_lora=use_lcm_lora,
                     use_tiny_vae=use_tiny_vae,
+                    lora_dict=lora_dict,
                     ipadapter_scale=ipadapter_scale,
                     ipadapter_tokens=ipadapter_tokens,
                     is_faceid=is_faceid if use_ipadapter_trt else None
@@ -1137,6 +1139,7 @@ class StreamDiffusionWrapper:
                     mode=self.mode,
                     use_lcm_lora=use_lcm_lora,
                     use_tiny_vae=use_tiny_vae,
+                    lora_dict=lora_dict,
                     ipadapter_scale=ipadapter_scale,
                     ipadapter_tokens=ipadapter_tokens,
                     is_faceid=is_faceid if use_ipadapter_trt else None
