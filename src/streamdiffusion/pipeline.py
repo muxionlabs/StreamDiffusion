@@ -66,6 +66,7 @@ class StreamDiffusion:
         # Force sequential processing for TCD
         if scheduler == "tcd":
             logger.info("TCD scheduler detected: Disabling denoising batch optimization for compatibility")
+            logger.info("TCD now supports ControlNet through proper hook processing")
             self.use_denoising_batch = False
             self.batch_size = frame_buffer_size
             self.trt_unet_batch_size = frame_buffer_size
@@ -979,6 +980,7 @@ class StreamDiffusion:
         prev_latent_batch = self.x_t_latent_buffer
         
         # LCM supports our denoising-batch trick. TCD must use standard scheduler.step() sequentially
+        # but now properly processes ControlNet hooks through unet_step()
         if self.use_denoising_batch and isinstance(self.scheduler, LCMScheduler):
             t_list = self.sub_timesteps_tensor
             if self.denoising_steps_num > 1:
@@ -1012,24 +1014,14 @@ class StreamDiffusion:
                 else:
                     t = timestep.to(self.device)
 
-                # For TCD, use the scheduler's step method
+                # For TCD, use the same UNet calling logic as LCM to ensure ControlNet hooks are processed
                 if isinstance(self.scheduler, TCDScheduler):
-                    # Scale model input per scheduler requirements
-                    model_input = (
-                        self.scheduler.scale_model_input(sample, t)
-                        if hasattr(self.scheduler, "scale_model_input")
-                        else sample
-                    )
-
-                    # Predict noise with CFG
-                    noise_pred = self._unet_predict_noise_cfg(
-                        latent_model_input=model_input,
-                        timestep=t,
-                        cfg_mode=self.cfg_type,
-                    )
-
-                    # Advance one step using TCD's step method
-                    step_out = self.scheduler.step(noise_pred, t, sample)
+                    # Use unet_step to process ControlNet hooks and get proper noise prediction
+                    t_expanded = t.view(1,).repeat(self.frame_bff_size,)
+                    x_0_pred, model_pred = self.unet_step(sample, t_expanded, idx)
+                    
+                    # Apply TCD scheduler step to the guided noise prediction
+                    step_out = self.scheduler.step(model_pred, t, sample)
                     sample = getattr(step_out, "prev_sample", step_out[0] if isinstance(step_out, (tuple, list)) else step_out)
                 else:
                     # Original LCM logic for non-batched mode
