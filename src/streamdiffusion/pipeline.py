@@ -25,6 +25,7 @@ class StreamDiffusion:
         self,
         pipe: StableDiffusionPipeline,
         t_index_list: List[int],
+        device: str = "cuda",
         torch_dtype: torch.dtype = torch.float16,
         width: int = 512,
         height: int = 512,
@@ -38,7 +39,7 @@ class StreamDiffusion:
         scheduler: Literal["lcm", "tcd"] = "lcm",
         sampler: Literal["simple", "sgm uniform", "normal", "ddim", "beta", "karras"] = "normal",
     ) -> None:
-        self.device = pipe.device
+        self.device = torch.device(device)
         self.dtype = torch_dtype
         self.generator = None
 
