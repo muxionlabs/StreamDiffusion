@@ -7,7 +7,8 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms as T
 from torchvision.transforms import InterpolationMode
-from diffusers import AutoencoderTiny, StableDiffusionPipeline, StableDiffusionXLPipeline, AutoPipelineForText2Image
+from diffusers import AutoencoderTiny, StableDiffusionPipeline, StableDiffusionXLPipeline, AutoPipelineForText2Image, UNet2DConditionModel
+from safetensors.torch import load_file
 
 from .pipeline import StreamDiffusion
 from .model_detection import detect_model
@@ -1011,21 +1012,78 @@ class StreamDiffusionWrapper:
             scheduler=scheduler,
             sampler=sampler,
         )
+        # Load and properly merge LoRA weights using the standard diffusers approach
         if not self.sd_turbo:
+            lora_adapters_to_merge = []
+            lora_scales_to_merge = []
+            
+            # Collect all LoRA adapters and their scales
             if use_lcm_lora:
                 if lcm_lora_id is not None:
-                    stream.load_lcm_lora(
-                        pretrained_model_name_or_path_or_dict=lcm_lora_id
-                    )
+                    logger.info(f"_load_model: Loading LCM LoRA from {lcm_lora_id}")
+                    stream.pipe.load_lora_weights(lcm_lora_id, adapter_name="lcm_lora")
                 else:
-                    stream.load_lcm_lora()
-                stream.fuse_lora()
+                    logger.info("_load_model: Loading default LCM LoRA")
+                    # Use appropriate default LCM LoRA based on model type
+                    default_lcm_lora = "latent-consistency/lcm-lora-sdxl" if is_sdxl else "latent-consistency/lcm-lora-sdv1-5"
+                    stream.pipe.load_lora_weights(default_lcm_lora, adapter_name="lcm_lora")
+                
+                lora_adapters_to_merge.append("lcm_lora")
+                lora_scales_to_merge.append(1.0)
 
             if lora_dict is not None:
-                for lora_name, lora_scale in lora_dict.items():
+                for i, (lora_name, lora_scale) in enumerate(lora_dict.items()):
+                    adapter_name = f"custom_lora_{i}"
                     logger.info(f"_load_model: Loading LoRA '{lora_name}' with scale {lora_scale}")
-                    stream.load_lora(lora_name)
-                    stream.fuse_lora(lora_scale=lora_scale)
+                    
+                    try:
+                        # Load LoRA weights with unique adapter name
+                        stream.pipe.load_lora_weights(lora_name, adapter_name=adapter_name)
+                        lora_adapters_to_merge.append(adapter_name)
+                        lora_scales_to_merge.append(lora_scale)
+                        logger.info(f"Successfully loaded LoRA adapter: {adapter_name}")
+                    except Exception as e:
+                        logger.error(f"Failed to load LoRA {lora_name}: {e}")
+                        # Continue with other LoRAs even if one fails
+                        continue
+            
+            # Merge all LoRA adapters using the proper diffusers method
+            if lora_adapters_to_merge:
+                try:
+                    logger.info(f"Merging {len(lora_adapters_to_merge)} LoRA adapter(s) with scales: {lora_scales_to_merge}")
+                    
+                    # Use the proper merge_and_unload method from diffusers
+                    # This permanently merges LoRA weights into the base model parameters
+                    stream.pipe.fuse_lora(lora_scale=lora_scales_to_merge, adapter_names=lora_adapters_to_merge)
+                    
+                    # After fusing, unload the LoRA weights to clean up memory and avoid conflicts
+                    stream.pipe.unload_lora_weights()
+                    
+                    logger.info("Successfully merged and unloaded LoRA weights using diffusers merge_and_unload")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to merge LoRA weights: {e}")
+                    logger.info("Attempting fallback: individual LoRA merging...")
+                    
+                    # Fallback: merge LoRAs individually
+                    try:
+                        for adapter_name, scale in zip(lora_adapters_to_merge, lora_scales_to_merge):
+                            logger.info(f"Merging individual LoRA: {adapter_name} with scale {scale}")
+                            stream.pipe.fuse_lora(lora_scale=scale, adapter_names=[adapter_name])
+                        
+                        # Clean up after individual merging
+                        stream.pipe.unload_lora_weights()
+                        logger.info("Successfully merged LoRAs individually")
+                        
+                    except Exception as fallback_error:
+                        logger.error(f"LoRA merging fallback also failed: {fallback_error}")
+                        logger.warning("Continuing without LoRA merging - LoRAs may not be applied correctly")
+                        
+                        # Clean up any partial state
+                        try:
+                            stream.pipe.unload_lora_weights()
+                        except:
+                            pass
 
         if use_tiny_vae:
             if vae_id is not None:
@@ -1034,7 +1092,6 @@ class StreamDiffusionWrapper:
                 # Use TAESD XL for SDXL models, regular TAESD for SD 1.5
                 taesd_model = "madebyollin/taesdxl" if is_sdxl else "madebyollin/taesd"
                 stream.vae = AutoencoderTiny.from_pretrained(taesd_model).to(dtype=pipe.dtype)
-    
 
         try:
             if acceleration == "xformers":
@@ -1243,10 +1300,15 @@ class StreamDiffusionWrapper:
                 except Exception:
                     pass
                 
-                # If using TensorRT with IP-Adapter, ensure processors and weights are installed BEFORE export
-                if use_ipadapter_trt and has_ipadapter and ipadapter_config and not hasattr(stream, '_ipadapter_module'):
+                # Note: LoRA weights have already been merged permanently during model loading
+                
+                # CRITICAL: Install IPAdapter module BEFORE TensorRT compilation to ensure processors are baked into engines
+                if use_ipadapter and ipadapter_config and not hasattr(stream, '_ipadapter_module'):
                     try:
                         from streamdiffusion.modules.ipadapter_module import IPAdapterModule, IPAdapterConfig
+                        logger.info("Installing IPAdapter module before TensorRT compilation...")
+                        
+                        # Use first config if list provided
                         cfg = ipadapter_config[0] if isinstance(ipadapter_config, list) else ipadapter_config
                         ip_cfg = IPAdapterConfig(
                             style_image_key=cfg.get('style_image_key') or 'ipadapter_main',
@@ -1258,17 +1320,28 @@ class StreamDiffusionWrapper:
                             is_faceid=(cfg.get('type') == 'faceid' or bool(cfg.get('is_faceid', False))),
                             insightface_model_name=cfg.get('insightface_model_name'),
                         )
-                        ip_module_for_export = IPAdapterModule(ip_cfg)
-                        ip_module_for_export.install(stream)
-                        setattr(stream, '_ipadapter_module', ip_module_for_export)
-                        try:
-                            logger.info("Installed IP-Adapter processors prior to TensorRT export")
-                        except Exception:
-                            pass
+                        ip_module = IPAdapterModule(ip_cfg)
+                        ip_module.install(stream)
+                        # Expose for later updates
+                        stream._ipadapter_module = ip_module
+                        logger.info("IPAdapter module installed successfully before TensorRT compilation")
+                        
+                        # Cleanup after IPAdapter installation
+                        import gc
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        
+                    except torch.cuda.OutOfMemoryError as oom_error:
+                        logger.error(f"CUDA Out of Memory during early IPAdapter installation: {oom_error}")
+                        logger.error("Try reducing batch size, using smaller models, or increasing GPU memory")
+                        raise RuntimeError("Insufficient VRAM for IPAdapter installation. Consider using a GPU with more memory or reducing model complexity.")
+                        
                     except Exception:
                         import traceback
                         traceback.print_exc()
-                        logger.error("Failed to pre-install IP-Adapter prior to TensorRT export")
+                        logger.error("Failed to install IPAdapterModule before TensorRT compilation")
+                        raise
 
                 # NOTE: When IPAdapter is enabled, we must pass num_ip_layers. We cannot know it until after
                 # installing processors in the export wrapper. We construct the wrapper first to discover it,
@@ -1492,46 +1565,47 @@ class StreamDiffusionWrapper:
                             logger.error(f"TensorRT VAE engine loading failed (non-OOM): {e}")
                             raise e
 
-            safety_checker_path = engine_manager.get_engine_path(
-                EngineType.SAFETY_CHECKER,
-                model_id_or_path=safety_checker_model_id,
-                max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                mode=self.mode,
-                use_lcm_lora=use_lcm_lora,
-                use_tiny_vae=use_tiny_vae,
-            )
-            safety_checker_engine_exists = os.path.exists(safety_checker_path)
+                # Safety checker engine (TensorRT-specific)
+                safety_checker_path = engine_manager.get_engine_path(
+                    EngineType.SAFETY_CHECKER,
+                    model_id_or_path=safety_checker_model_id,
+                    max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                    min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                    mode=self.mode,
+                    use_lcm_lora=use_lcm_lora,
+                    use_tiny_vae=use_tiny_vae,
+                )
+                safety_checker_engine_exists = os.path.exists(safety_checker_path)
 
-            # Always load the safety checker if the engine exists. The model is really small and may be toggled later.
-            if self.use_safety_checker or safety_checker_engine_exists:
-                if not safety_checker_engine_exists:
-                    from transformers import AutoModelForImageClassification
-                    self.safety_checker = AutoModelForImageClassification.from_pretrained(safety_checker_model_id).to("cuda")
+                # Always load the safety checker if the engine exists. The model is really small and may be toggled later.
+                if self.use_safety_checker or safety_checker_engine_exists:
+                    if not safety_checker_engine_exists:
+                        from transformers import AutoModelForImageClassification
+                        self.safety_checker = AutoModelForImageClassification.from_pretrained(safety_checker_model_id).to("cuda")
 
-                    safety_checker_model = NSFWDetector(
-                        device=self.device,
-                        max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                        min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                    )
+                        safety_checker_model = NSFWDetector(
+                            device=self.device,
+                            max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                            min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                        )
 
-                    engine_manager.compile_and_load_engine(
-                        EngineType.SAFETY_CHECKER,
-                        safety_checker_path,
-                        model=self.safety_checker,
-                        model_config=safety_checker_model,
-                        batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
-                        cuda_stream=None,
-                        load_engine=load_engine,
-                    )
-                
-                if load_engine:
-                    self.safety_checker = NSFWDetectorEngine(
-                        safety_checker_path,
-                        cuda_stream,
-                        use_cuda_graph=True,
-                    )
+                        engine_manager.compile_and_load_engine(
+                            EngineType.SAFETY_CHECKER,
+                            safety_checker_path,
+                            model=self.safety_checker,
+                            model_config=safety_checker_model,
+                            batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
+                            cuda_stream=None,
+                            load_engine=load_engine,
+                        )
                     
+                    if load_engine:
+                        self.safety_checker = NSFWDetectorEngine(
+                            safety_checker_path,
+                            cuda_stream,
+                            use_cuda_graph=True,
+                        )
+                        
             if acceleration == "sfast":
                 from streamdiffusion.acceleration.sfast import (
                     accelerate_with_stable_fast,
@@ -1613,32 +1687,16 @@ class StreamDiffusionWrapper:
                 logger.error("Failed to install ControlNetModule")
                 raise
 
+        # IPAdapter module installation has been moved to before TensorRT compilation (see lines 1307-1345)
+        # This ensures processors are properly baked into the TensorRT engines
         if use_ipadapter and ipadapter_config and not hasattr(stream, '_ipadapter_module'):
-            try:
-                from streamdiffusion.modules.ipadapter_module import IPAdapterModule, IPAdapterConfig
-                # Use first config if list provided
-                cfg = ipadapter_config[0] if isinstance(ipadapter_config, list) else ipadapter_config
-                ip_cfg = IPAdapterConfig(
-                    style_image_key=cfg.get('style_image_key') or 'ipadapter_main',
-                    num_image_tokens=cfg.get('num_image_tokens', 4),
-                    ipadapter_model_path=cfg['ipadapter_model_path'],
-                    image_encoder_path=cfg['image_encoder_path'],
-                    style_image=cfg.get('style_image'),
-                    scale=cfg.get('scale', 1.0),
-                    is_faceid=(cfg.get('type') == 'faceid' or bool(cfg.get('is_faceid', False))),
-                    insightface_model_name=cfg.get('insightface_model_name'),
-                )
-                ip_module = IPAdapterModule(ip_cfg)
-                ip_module.install(stream)
-                # Expose for later updates
-                stream._ipadapter_module = ip_module
-            except Exception:
-                import traceback
-                traceback.print_exc()
-                logger.error("Failed to install IPAdapterModule")
-                raise
+            logger.warning("IPAdapter was not installed during TensorRT compilation phase - this may cause runtime issues")
+            logger.warning("IPAdapter should have been installed before engine compilation for proper TensorRT integration")
+
+        # Note: LoRA weights have already been merged permanently during model loading
 
         return stream
+
 
     def get_last_processed_image(self, index: int) -> Optional[Image.Image]:
         """Forward get_last_processed_image call to the underlying ControlNet pipeline"""
