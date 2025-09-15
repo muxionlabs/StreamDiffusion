@@ -9,6 +9,7 @@
   import ControlNetConfig from '$lib/components/ControlNetConfig.svelte';
   import IPAdapterConfig from '$lib/components/IPAdapterConfig.svelte';
   import BlendingControl from '$lib/components/BlendingControl.svelte';
+  import PipelineHooksConfig from '$lib/components/PipelineHooksConfig.svelte';
   import ResolutionPicker from '$lib/components/ResolutionPicker.svelte';
   import Spinner from '$lib/icons/spinner.svelte';
   import Warning from '$lib/components/Warning.svelte';
@@ -24,6 +25,10 @@
   let pipelineInfo: PipelineInfo;
   let controlnetInfo: any = null;
   let ipadapterInfo: any = null;
+  let imagePreprocessingInfo: any = null;
+  let imagePostprocessingInfo: any = null;
+  let latentPreprocessingInfo: any = null;
+  let latentPostprocessingInfo: any = null;
   let ipadapterScale: number = 1.0;
   let ipadapterWeightType: string = "linear";
   let tIndexList: number[] = [35, 45];
@@ -35,6 +40,7 @@
   let seedBlendingConfig: any = null;
   let normalizePromptWeights: boolean = true;
   let normalizeSeedWeights: boolean = true;
+  let skipDiffusion: boolean = false;
   let pageContent: string;
   let isImageMode: boolean = false;
   let maxQueueSize: number = 0;
@@ -125,6 +131,39 @@
       
       controlnetInfo = settings.controlnet || null;
       ipadapterInfo = settings.ipadapter || null;
+      
+      // Load pipeline hooks info
+      try {
+        const [imgPreResponse, imgPostResponse, latPreResponse, latPostResponse] = await Promise.all([
+          fetch('/api/pipeline-hooks/image_preprocessing/info-config'),
+          fetch('/api/pipeline-hooks/image_postprocessing/info-config'),
+          fetch('/api/pipeline-hooks/latent_preprocessing/info-config'),
+          fetch('/api/pipeline-hooks/latent_postprocessing/info-config')
+        ]);
+        
+        if (imgPreResponse.ok) {
+          const data = await imgPreResponse.json();
+          imagePreprocessingInfo = data.image_preprocessing || null;
+        }
+        
+        if (imgPostResponse.ok) {
+          const data = await imgPostResponse.json();
+          imagePostprocessingInfo = data.image_postprocessing || null;
+        }
+        
+        if (latPreResponse.ok) {
+          const data = await latPreResponse.json();
+          latentPreprocessingInfo = data.latent_preprocessing || null;
+        }
+        
+        if (latPostResponse.ok) {
+          const data = await latPostResponse.json();
+          latentPostprocessingInfo = data.latent_postprocessing || null;
+        }
+      } catch (err) {
+        console.warn('getSettings: Failed to load pipeline hooks info:', err);
+      }
+      
       selectedModelId = settings.model_id || '';
       // Apply config_values (from YAML) into the pipelineValues store for immediate UI sync
       if (settings.config_values) {
@@ -144,6 +183,7 @@
       seedBlendingConfig = settings.seed_blending || null;
       normalizePromptWeights = settings.normalize_prompt_weights ?? true;
       normalizeSeedWeights = settings.normalize_seed_weights ?? true;
+      skipDiffusion = settings.skip_diffusion || false;
       isImageMode = pipelineInfo.input_mode.default === PipelineMode.IMAGE;
       maxQueueSize = settings.max_queue_size;
       pageContent = settings.page_content;
@@ -238,6 +278,38 @@
       }
     } catch (error) {
       console.error('handleTIndexListUpdate: Failed to update t_index_list:', error);
+    }
+  }
+
+  async function handleSkipDiffusionUpdate(enabled: boolean) {
+    try {
+      const response = await fetch('/api/params', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          skip_diffusion: enabled
+        }),
+      });
+
+      if (response.ok) {
+        skipDiffusion = enabled; // Update local state
+        console.log('handleSkipDiffusionUpdate: Skip diffusion updated:', skipDiffusion);
+        
+        // Show success message
+        successMessage = `Skip diffusion ${enabled ? 'enabled' : 'disabled'}. ${enabled ? 'Only pre/post processing will run.' : 'Full diffusion pipeline restored.'}`;
+        setTimeout(() => {
+          successMessage = '';
+        }, 3000);
+      } else {
+        const result = await response.json();
+        console.error('handleSkipDiffusionUpdate: Failed to update skip_diffusion:', result.detail);
+        warningMessage = 'Failed to update skip diffusion: ' + result.detail;
+      }
+    } catch (error) {
+      console.error('handleSkipDiffusionUpdate: Failed to update skip_diffusion:', error);
+      warningMessage = 'Failed to update skip diffusion: ' + (error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -403,6 +475,54 @@
     }
   }
 
+  async function handleImagePreprocessingRefresh() {
+    try {
+      const response = await fetch('/api/pipeline-hooks/image_preprocessing/info-config');
+      if (response.ok) {
+        const data = await response.json();
+        imagePreprocessingInfo = data.image_preprocessing || null;
+      }
+    } catch (err) {
+      console.warn('handleImagePreprocessingRefresh: Failed to refresh image preprocessing info:', err);
+    }
+  }
+
+  async function handleImagePostprocessingRefresh() {
+    try {
+      const response = await fetch('/api/pipeline-hooks/image_postprocessing/info-config');
+      if (response.ok) {
+        const data = await response.json();
+        imagePostprocessingInfo = data.image_postprocessing || null;
+      }
+    } catch (err) {
+      console.warn('handleImagePostprocessingRefresh: Failed to refresh image postprocessing info:', err);
+    }
+  }
+
+  async function handleLatentPreprocessingRefresh() {
+    try {
+      const response = await fetch('/api/pipeline-hooks/latent_preprocessing/info-config');
+      if (response.ok) {
+        const data = await response.json();
+        latentPreprocessingInfo = data.latent_preprocessing || null;
+      }
+    } catch (err) {
+      console.warn('handleLatentPreprocessingRefresh: Failed to refresh latent preprocessing info:', err);
+    }
+  }
+
+  async function handleLatentPostprocessingRefresh() {
+    try {
+      const response = await fetch('/api/pipeline-hooks/latent_postprocessing/info-config');
+      if (response.ok) {
+        const data = await response.json();
+        latentPostprocessingInfo = data.latent_postprocessing || null;
+      }
+    } catch (err) {
+      console.warn('handleLatentPostprocessingRefresh: Failed to refresh latent postprocessing info:', err);
+    }
+  }
+
   // Pipeline configuration upload
   let fileInput: HTMLInputElement;
   let uploading = false;
@@ -483,6 +603,9 @@
         if (result.normalize_seed_weights !== undefined) {
           normalizeSeedWeights = result.normalize_seed_weights;
         }
+        if (result.skip_diffusion !== undefined) {
+          skipDiffusion = result.skip_diffusion;
+        }
         
         // Update blending configurations
         if (result.prompt_blending) {
@@ -522,6 +645,24 @@
             resolution: result.current_resolution
           }));
           console.log('uploadConfig: Updated resolution to:', result.current_resolution);
+        }
+        
+        // Update pipeline hooks info
+        if (result.image_preprocessing) {
+          imagePreprocessingInfo = result.image_preprocessing;
+          console.log('uploadConfig: Updated image preprocessing info:', imagePreprocessingInfo);
+        }
+        if (result.image_postprocessing) {
+          imagePostprocessingInfo = result.image_postprocessing;
+          console.log('uploadConfig: Updated image postprocessing info:', imagePostprocessingInfo);
+        }
+        if (result.latent_preprocessing) {
+          latentPreprocessingInfo = result.latent_preprocessing;
+          console.log('uploadConfig: Updated latent preprocessing info:', latentPreprocessingInfo);
+        }
+        if (result.latent_postprocessing) {
+          latentPostprocessingInfo = result.latent_postprocessing;
+          console.log('uploadConfig: Updated latent postprocessing info:', latentPostprocessingInfo);
         }
         
         // Success toast will auto-dismiss
@@ -883,6 +1024,32 @@
             currentScale={ipadapterScale}
             currentWeightType={ipadapterWeightType}
           ></IPAdapterConfig>
+
+          <PipelineHooksConfig 
+            hookType="image_preprocessing"
+            hookInfo={imagePreprocessingInfo}
+            {skipDiffusion}
+            on:refresh={handleImagePreprocessingRefresh}
+            on:skipDiffusionChanged={(e) => handleSkipDiffusionUpdate(e.detail)}
+          ></PipelineHooksConfig>
+
+          <PipelineHooksConfig 
+            hookType="image_postprocessing"
+            hookInfo={imagePostprocessingInfo}
+            on:refresh={handleImagePostprocessingRefresh}
+          ></PipelineHooksConfig>
+
+          <PipelineHooksConfig 
+            hookType="latent_preprocessing"
+            hookInfo={latentPreprocessingInfo}
+            on:refresh={handleLatentPreprocessingRefresh}
+          ></PipelineHooksConfig>
+
+          <PipelineHooksConfig 
+            hookType="latent_postprocessing"
+            hookInfo={latentPostprocessingInfo}
+            on:refresh={handleLatentPostprocessingRefresh}
+          ></PipelineHooksConfig>
         </div>
       {:else}
         <!-- Collapsed Right Panel Toggle -->

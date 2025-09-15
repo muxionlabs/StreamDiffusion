@@ -5,10 +5,7 @@ from typing import Dict, List, Literal, Optional, Union, Any, Tuple
 import torch
 import numpy as np
 from PIL import Image
-import torchvision.transforms as T
-from torchvision.transforms import InterpolationMode
-from diffusers import AutoencoderTiny, StableDiffusionPipeline, StableDiffusionXLPipeline, AutoPipelineForText2Image, UNet2DConditionModel
-from safetensors.torch import load_file
+from diffusers import AutoencoderTiny, StableDiffusionPipeline, StableDiffusionXLPipeline, AutoPipelineForText2Image
 
 from .pipeline import StreamDiffusion
 from .model_detection import detect_model
@@ -98,6 +95,7 @@ class StreamDiffusionWrapper:
         cfg_type: Literal["none", "full", "self", "initialize"] = "self",
         seed: int = 2,
         use_safety_checker: bool = False,
+        skip_diffusion: bool = False,
         engine_dir: Optional[Union[str, Path]] = "engines",
         compile_engines_only: bool = False,
         build_engines_if_missing: bool = True,
@@ -112,9 +110,13 @@ class StreamDiffusionWrapper:
         # IPAdapter options
         use_ipadapter: bool = False,
         ipadapter_config: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
-        safety_checker_model_id: Optional[str] = "Falconsai/nsfw_image_detection",
+        # Pipeline hook configurations
+        image_preprocessing_config: Optional[Dict[str, Any]] = None,
+        image_postprocessing_config: Optional[Dict[str, Any]] = None,
+        latent_preprocessing_config: Optional[Dict[str, Any]] = None,
+        latent_postprocessing_config: Optional[Dict[str, Any]] = None,
         safety_checker_fallback_type: Literal["blank", "previous"] = "previous",
-        safety_checker_threshold: float = 0.95,
+        safety_checker_threshold: float = 0.5,
     ):
         """
         Initializes the StreamDiffusionWrapper.
@@ -199,8 +201,8 @@ class StreamDiffusionWrapper:
             Each config should contain: model_id, preprocessor (optional), conditioning_scale, etc.
         safety_checker_fallback_type : Literal["blank", "previous"], optional
             Whether to use a blank image or the previous image as a fallback, by default "previous".
-        safety_checker_threshold : float, optional
-            The threshold for the safety checker, by default 0.95.
+        safety_checker_threshold: float, optional
+            The threshold for the safety checker, by default 0.5.
         compile_engines_only : bool, optional
             Whether to only compile engines and not load the model, by default False.
         """
@@ -211,6 +213,12 @@ class StreamDiffusionWrapper:
         self.use_controlnet = use_controlnet
         self.use_ipadapter = use_ipadapter
         self.ipadapter_config = ipadapter_config
+        
+        # Store pipeline hook configurations
+        self.image_preprocessing_config = image_preprocessing_config
+        self.image_postprocessing_config = image_postprocessing_config
+        self.latent_preprocessing_config = latent_preprocessing_config
+        self.latent_postprocessing_config = latent_postprocessing_config
 
         if mode == "txt2img":
             if cfg_type != "none":
@@ -268,9 +276,16 @@ class StreamDiffusionWrapper:
             controlnet_config=controlnet_config,
             use_ipadapter=use_ipadapter,
             ipadapter_config=ipadapter_config,
-            safety_checker_model_id=safety_checker_model_id,
+            # Pipeline hook configurations
+            image_preprocessing_config=image_preprocessing_config,
+            image_postprocessing_config=image_postprocessing_config,
+            latent_preprocessing_config=latent_preprocessing_config,
+            latent_postprocessing_config=latent_postprocessing_config,
             compile_engines_only=compile_engines_only,
         )
+
+        # Store skip_diffusion on wrapper for execution flow control
+        self.skip_diffusion = skip_diffusion
 
         if compile_engines_only:
             return
@@ -306,14 +321,9 @@ class StreamDiffusionWrapper:
                 similar_image_filter_threshold, similar_image_filter_max_skip_frame
             )
 
-        self.safety_image_transforms = T.Compose([
-            T.Resize(size=(224, 224), interpolation=InterpolationMode.BICUBIC, antialias=True),
-            T.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
         self.set_nsfw_fallback_img(height, width)
         self.safety_checker_fallback_type = safety_checker_fallback_type
         self.safety_checker_threshold = safety_checker_threshold
-        self.safety_checker_streak = 0
 
     def prepare(
         self,
@@ -490,6 +500,11 @@ class StreamDiffusionWrapper:
         controlnet_config: Optional[List[Dict[str, Any]]] = None,
         # IPAdapter configuration
         ipadapter_config: Optional[Dict[str, Any]] = None,
+        # Hook configurations
+        image_preprocessing_config: Optional[List[Dict[str, Any]]] = None,
+        image_postprocessing_config: Optional[List[Dict[str, Any]]] = None,
+        latent_preprocessing_config: Optional[List[Dict[str, Any]]] = None,
+        latent_postprocessing_config: Optional[List[Dict[str, Any]]] = None,
         use_safety_checker: Optional[bool] = None,
         safety_checker_threshold: Optional[float] = None,
     ) -> None:
@@ -535,9 +550,6 @@ class StreamDiffusionWrapper:
             IPAdapter configuration dict containing scale, style_image, etc.
         use_safety_checker : Optional[bool]
             Whether to use the safety checker.
-        safety_checker_threshold : Optional[float]
-            Probability threshold for the safety checker (0.0–1.0). Frames with
-            NSFW probability above this value will trigger the configured fallback.
         """
         # Handle all parameters via parameter updater (including ControlNet)
         self.stream._param_updater.update_stream_params(
@@ -555,6 +567,10 @@ class StreamDiffusionWrapper:
             normalize_seed_weights=normalize_seed_weights,
             controlnet_config=controlnet_config,
             ipadapter_config=ipadapter_config,
+            image_preprocessing_config=image_preprocessing_config,
+            image_postprocessing_config=image_postprocessing_config,
+            latent_preprocessing_config=latent_preprocessing_config,
+            latent_postprocessing_config=latent_postprocessing_config,
         )
         if use_safety_checker is not None:
             self.use_safety_checker = use_safety_checker
@@ -581,10 +597,67 @@ class StreamDiffusionWrapper:
         Union[Image.Image, List[Image.Image]]
             The generated image.
         """
+        if self.skip_diffusion:
+            return self._process_skip_diffusion(image, prompt)
+        
         if self.mode == "img2img":
             return self.img2img(image, prompt)
         else:
             return self.txt2img(prompt)
+
+    def _process_skip_diffusion(
+        self, 
+        image: Optional[Union[str, Image.Image, torch.Tensor]] = None, 
+        prompt: Optional[str] = None
+    ) -> Union[Image.Image, List[Image.Image], torch.Tensor, np.ndarray]:
+        """
+        Process input directly without diffusion, applying pre/post processing hooks.
+        
+        This method bypasses VAE encoding, diffusion, and VAE decoding, but still
+        applies image preprocessing and postprocessing hooks for consistent processing.
+        
+        Parameters
+        ----------
+        image : Optional[Union[str, Image.Image, torch.Tensor]]
+            The image to process directly.
+        prompt : Optional[str]
+            Prompt (ignored in skip mode, but kept for API consistency).
+            
+        Returns
+        -------
+        Union[Image.Image, List[Image.Image], torch.Tensor, np.ndarray]
+            The processed image with hooks applied.
+        """
+
+        #TODO: add safety checker call somewhere in this method
+
+
+        if self.mode == "txt2img":
+            raise RuntimeError("_process_skip_diffusion: skip_diffusion mode not applicable for txt2img - no input image")
+        
+        if image is None:
+            raise ValueError("_process_skip_diffusion: image required for skip diffusion mode")
+        
+        # Handle input tensor normalization to [-1,1] pipeline range
+        if isinstance(image, str) or isinstance(image, Image.Image):
+            processed_tensor = self.preprocess_image(image)
+            preprocessor_input = self._denormalize_on_gpu(processed_tensor)
+        elif isinstance(image, torch.Tensor):
+            # Ensure tensor is on correct device and dtype first
+            preprocessor_input = image.to(device=self.device, dtype=self.dtype)
+        else:
+            preprocessor_input = image
+
+        preprocessor_output = self.stream._apply_image_preprocessing_hooks(preprocessor_input)
+        
+        # Convert [0,1] -> [-1,1] back to pipeline range for postprocessing hooks
+        processed_tensor = self._normalize_on_gpu(preprocessor_output)
+        
+        # Apply image postprocessing hooks (expect [-1,1] range - post-VAE decoding)
+        processed_tensor = self.stream._apply_image_postprocessing_hooks(processed_tensor)
+        
+        # Final postprocessing for output format
+        return self.postprocess_image(processed_tensor, output_type=self.output_type)
 
     def txt2img(
         self, prompt: Optional[str] = None
@@ -605,11 +678,12 @@ class StreamDiffusionWrapper:
         """
         if prompt is not None:
             self.update_prompt(prompt, warn_about_conflicts=True)
-
+        
         if self.sd_turbo:
             image_tensor = self.stream.txt2img_sd_turbo(self.batch_size)
         else:
             image_tensor = self.stream.txt2img(self.frame_buffer_size)
+        
         image = self.postprocess_image(image_tensor, output_type=self.output_type)
 
         if self.use_safety_checker:
@@ -617,17 +691,10 @@ class StreamDiffusionWrapper:
                 denormalized_image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1).to(self.device)
             else:
                 denormalized_image_tensor = image
-            pixel_values = self.safety_image_transforms(denormalized_image_tensor)
-            logits = self.safety_checker(pixel_values)
-            nsfw_prob = torch.softmax(logits, dim=-1)[0][1].item()
-            if nsfw_prob > self.safety_checker_threshold:
-                self.safety_checker_streak += 1
-                if self.safety_checker_streak > 3:
-                    image = self.nsfw_fallback_img
-            else:
-                self.safety_checker_streak = 0
-                if self.safety_checker_fallback_type == "previous":
-                    self.nsfw_fallback_img = image
+            if self.safety_checker(denormalized_image_tensor, self.safety_checker_threshold):
+                image = self.nsfw_fallback_img
+            elif self.safety_checker_fallback_type == "previous":
+                self.nsfw_fallback_img = image
 
         return image
 
@@ -656,6 +723,7 @@ class StreamDiffusionWrapper:
         if isinstance(image, str) or isinstance(image, Image.Image):
             image = self.preprocess_image(image)
 
+        # Full pipeline with diffusion
         image_tensor = self.stream(image)
         image = self.postprocess_image(image_tensor, output_type=self.output_type)
         if self.use_safety_checker:
@@ -663,17 +731,10 @@ class StreamDiffusionWrapper:
                 denormalized_image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1).to(self.device)
             else:
                 denormalized_image_tensor = image
-            pixel_values = self.safety_image_transforms(denormalized_image_tensor)
-            logits = self.safety_checker(pixel_values)
-            nsfw_prob = torch.softmax(logits, dim=-1)[0][1].item()
-            if nsfw_prob > self.safety_checker_threshold:
-                self.safety_checker_streak += 1
-                if self.safety_checker_streak > 3:
-                    image = self.nsfw_fallback_img
-            else:
-                self.safety_checker_streak = 0
-                if self.safety_checker_fallback_type == "previous":
-                    self.nsfw_fallback_img = image
+            if self.safety_checker(denormalized_image_tensor, self.safety_checker_threshold):
+                image = self.nsfw_fallback_img
+            elif self.safety_checker_fallback_type == "previous":
+                self.nsfw_fallback_img = image
 
         return image
 
@@ -760,6 +821,10 @@ class StreamDiffusionWrapper:
         """
         return (image_tensor / 2 + 0.5).clamp(0, 1)
 
+    def _normalize_on_gpu(self, image_tensor: torch.Tensor) -> torch.Tensor:
+        """Convert tensor from [0,1] (processor range) back to [-1,1] (diffusion range)"""
+        return (image_tensor * 2 - 1).clamp(-1, 1)
+
     def _tensor_to_pil_optimized(self, image_tensor: torch.Tensor) -> List[Image.Image]:
         """
         Optimized tensor to PIL conversion with minimal CPU transfers
@@ -836,7 +901,12 @@ class StreamDiffusionWrapper:
         controlnet_config: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
         use_ipadapter: bool = False,
         ipadapter_config: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
-        safety_checker_model_id: Optional[str] = "Falconsai/nsfw_image_detection",
+        # Pipeline hook configurations (Phase 4: Configuration Integration)
+        image_preprocessing_config: Optional[Dict[str, Any]] = None,
+        image_postprocessing_config: Optional[Dict[str, Any]] = None,
+        latent_preprocessing_config: Optional[Dict[str, Any]] = None,
+        latent_postprocessing_config: Optional[Dict[str, Any]] = None,
+        safety_checker_model_id: Optional[str] = "Freepik/nsfw_image_detector",
         compile_engines_only: bool = False,
     ) -> StreamDiffusion:
         """
@@ -903,6 +973,14 @@ class StreamDiffusionWrapper:
             self.cleanup_gpu_memory()
         except Exception as e:
             logger.warning(f"GPU cleanup warning: {e}")
+        
+        # Reset CUDA context to prevent corruption from previous runs
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # Force CUDA context reset by creating and destroying a small tensor
+        temp_tensor = torch.zeros(1, device=self.device)
+        del temp_tensor
+        logger.info("_load_model: CUDA context reset completed")
 
         # First, try to detect if this is an SDXL model before loading
         # TODO: CAN we do this step with model_detection.py?
@@ -1639,6 +1717,7 @@ class StreamDiffusionWrapper:
                         preprocessor=cfg.get('preprocessor'),
                         conditioning_scale=cfg.get('conditioning_scale', 1.0),
                         enabled=cfg.get('enabled', True),
+                        conditioning_channels=cfg.get('conditioning_channels'),
                         preprocessor_params=cfg.get('preprocessor_params'),
                     )
                     cn_module.add_controlnet(cn_cfg, control_image=cfg.get('control_image'))
@@ -1663,6 +1742,7 @@ class StreamDiffusionWrapper:
                                 unet=None,
                                 model_path=cfg['model_id'],
                                 load_engine=load_engine,
+                                conditioning_channels=cfg.get('conditioning_channels', 3)
                             )
                             try:
                                 setattr(engine, 'model_id', cfg['model_id'])
@@ -1695,6 +1775,51 @@ class StreamDiffusionWrapper:
 
         # Note: LoRA weights have already been merged permanently during model loading
 
+        # Install pipeline hook modules (Phase 4: Configuration Integration)
+        if image_preprocessing_config and image_preprocessing_config.get('enabled', True):
+            try:
+                from streamdiffusion.modules.image_processing_module import ImagePreprocessingModule
+                img_pre_module = ImagePreprocessingModule()
+                img_pre_module.install(stream)
+                for proc_config in image_preprocessing_config.get('processors', []):
+                    img_pre_module.add_processor(proc_config)
+                stream._image_preprocessing_module = img_pre_module
+            except Exception as e:
+                logger.error(f"Failed to install ImagePreprocessingModule: {e}")
+        
+        if image_postprocessing_config and image_postprocessing_config.get('enabled', True):
+            try:
+                from streamdiffusion.modules.image_processing_module import ImagePostprocessingModule
+                img_post_module = ImagePostprocessingModule()
+                img_post_module.install(stream)
+                for proc_config in image_postprocessing_config.get('processors', []):
+                    img_post_module.add_processor(proc_config)
+                stream._image_postprocessing_module = img_post_module
+            except Exception as e:
+                logger.error(f"Failed to install ImagePostprocessingModule: {e}")
+        
+        if latent_preprocessing_config and latent_preprocessing_config.get('enabled', True):
+            try:
+                from streamdiffusion.modules.latent_processing_module import LatentPreprocessingModule
+                latent_pre_module = LatentPreprocessingModule()
+                latent_pre_module.install(stream)
+                for proc_config in latent_preprocessing_config.get('processors', []):
+                    latent_pre_module.add_processor(proc_config)
+                stream._latent_preprocessing_module = latent_pre_module
+            except Exception as e:
+                logger.error(f"Failed to install LatentPreprocessingModule: {e}")
+        
+        if latent_postprocessing_config and latent_postprocessing_config.get('enabled', True):
+            try:
+                from streamdiffusion.modules.latent_processing_module import LatentPostprocessingModule
+                latent_post_module = LatentPostprocessingModule()
+                latent_post_module.install(stream)
+                for proc_config in latent_postprocessing_config.get('processors', []):
+                    latent_post_module.add_processor(proc_config)
+                stream._latent_postprocessing_module = latent_post_module
+            except Exception as e:
+                logger.error(f"Failed to install LatentPostprocessingModule: {e}")
+
         return stream
 
 
@@ -1717,8 +1842,10 @@ class StreamDiffusionWrapper:
         """Update control image for specific ControlNet index"""
         if not self.use_controlnet:
             raise RuntimeError("update_control_image: ControlNet support not enabled. Set use_controlnet=True in constructor.")
-
-        self.stream._controlnet_module.update_control_image_efficient(image, index=index)
+        if not self.skip_diffusion:
+            self.stream._controlnet_module.update_control_image_efficient(image, index=index)
+        else:
+            logger.debug("update_control_image: Skipping ControlNet update in skip diffusion mode")
 
 
     def update_style_image(self, image: Union[str, Image.Image, torch.Tensor]) -> None:
@@ -1810,9 +1937,31 @@ class StreamDiffusionWrapper:
             ipadapter_config = updater._get_current_ipadapter_config()
         except Exception:
             ipadapter_config = None
+        # Hook configs
+        try:
+            image_preprocessing_config = updater._get_current_hook_config('image_preprocessing')
+        except Exception:
+            image_preprocessing_config = []
+        try:
+            image_postprocessing_config = updater._get_current_hook_config('image_postprocessing')
+        except Exception:
+            image_postprocessing_config = []
+        try:
+            latent_preprocessing_config = updater._get_current_hook_config('latent_preprocessing')
+        except Exception:
+            latent_preprocessing_config = []
+        try:
+            latent_postprocessing_config = updater._get_current_hook_config('latent_postprocessing')
+        except Exception:
+            latent_postprocessing_config = []
+            
         state.update({
             'controlnet_config': controlnet_config,
             'ipadapter_config': ipadapter_config,
+            'image_preprocessing_config': image_preprocessing_config,
+            'image_postprocessing_config': image_postprocessing_config,
+            'latent_preprocessing_config': latent_preprocessing_config,
+            'latent_postprocessing_config': latent_postprocessing_config,
         })
 
         # Optional caches
@@ -1919,19 +2068,17 @@ class StreamDiffusionWrapper:
         for i in range(3):
             gc.collect()
         
-        # Clear CUDA cache multiple times
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            
-            # Force additional memory cleanup
-            torch.cuda.ipc_collect()
-            torch.cuda.empty_cache()
-            
-            # Get memory info
-            allocated = torch.cuda.memory_allocated() / (1024**3)  # GB
-            cached = torch.cuda.memory_reserved() / (1024**3)     # GB
-            logger.info(f"   GPU Memory after cleanup: {allocated:.2f}GB allocated, {cached:.2f}GB cached")
+        # Clear CUDA cache and cleanup IPC handles
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+        # Force additional memory cleanup
+        torch.cuda.ipc_collect()
+        
+        # Get memory info
+        allocated = torch.cuda.memory_allocated() / (1024**3)  # GB
+        cached = torch.cuda.memory_reserved() / (1024**3)     # GB
+        logger.info(f"   GPU Memory after cleanup: {allocated:.2f}GB allocated, {cached:.2f}GB cached")
         
         logger.info("   Enhanced GPU memory cleanup complete")
 
