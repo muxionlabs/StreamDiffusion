@@ -99,7 +99,6 @@ class EngineManager:
                        max_batch_size: int,
                        min_batch_size: int,
                        mode: str,
-                       use_lcm_lora: bool,
                        use_tiny_vae: bool,
                        lora_dict: Optional[Dict[str, float]] = None,
                        ipadapter_scale: Optional[float] = None,
@@ -132,7 +131,7 @@ class EngineManager:
             base_name = maybe_path.stem if maybe_path.exists() else model_id_or_path
             
             # Create prefix (from wrapper.py lines 1005-1013)
-            prefix = f"{base_name}--lcm_lora-{use_lcm_lora}--tiny_vae-{use_tiny_vae}--min_batch-{min_batch_size}--max_batch-{max_batch_size}"
+            prefix = f"{base_name}--tiny_vae-{use_tiny_vae}--min_batch-{min_batch_size}--max_batch-{max_batch_size}"
             
             # IP-Adapter differentiation: add type and (optionally) tokens
             # Keep scale out of identity for runtime control, but include a type flag to separate caches
@@ -309,7 +308,6 @@ class EngineManager:
             max_batch_size=max_batch_size,
             min_batch_size=min_batch_size,
             mode="",  # Not used for ControlNet
-            use_lcm_lora=False,  # Not used for ControlNet
             use_tiny_vae=False,  # Not used for ControlNet
             controlnet_model_id=model_id
         )

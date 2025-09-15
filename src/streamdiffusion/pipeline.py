@@ -231,21 +231,6 @@ class StreamDiffusion:
 
 
 
-    def load_lcm_lora(
-        self,
-        pretrained_model_name_or_path_or_dict: Union[
-            str, Dict[str, torch.Tensor]
-        ] = "latent-consistency/lcm-lora-sdv1-5",
-        adapter_name: Optional[Any] = None,
-        **kwargs,
-    ) -> None:
-        # Check for SDXL compatibility
-        if self.is_sdxl:
-            return
-            
-        self._load_lora_with_offline_fallback(
-            pretrained_model_name_or_path_or_dict, adapter_name, **kwargs
-        )
 
     def load_lora(
         self,

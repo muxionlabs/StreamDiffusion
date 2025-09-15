@@ -75,7 +75,6 @@ class StreamDiffusionWrapper:
         lora_dict: Optional[Dict[str, float]] = None,
         mode: Literal["img2img", "txt2img"] = "img2img",
         output_type: Literal["pil", "pt", "np", "latent"] = "pil",
-        lcm_lora_id: Optional[str] = None,
         vae_id: Optional[str] = None,
         device: Literal["cpu", "cuda"] = "cuda",
         dtype: torch.dtype = torch.float16,
@@ -86,7 +85,7 @@ class StreamDiffusionWrapper:
         acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
         do_add_noise: bool = True,
         device_ids: Optional[List[int]] = None,
-        use_lcm_lora: bool = True,
+        use_lcm_lora: Optional[bool] = None,  # Backwards compatibility parameter
         use_tiny_vae: bool = True,
         enable_similar_image_filter: bool = False,
         similar_image_filter_threshold: float = 0.98,
@@ -135,10 +134,6 @@ class StreamDiffusionWrapper:
             txt2img or img2img, by default "img2img".
         output_type : Literal["pil", "pt", "np", "latent"], optional
             The output type of image, by default "pil".
-        lcm_lora_id : Optional[str], optional
-            The lcm_lora_id to load, by default None.
-            If None, the default LCM-LoRA
-            ("latent-consistency/lcm-lora-sdv1-5") will be used.
         vae_id : Optional[str], optional
             The vae_id to load, by default None.
             If None, the default TinyVAE
@@ -162,8 +157,6 @@ class StreamDiffusionWrapper:
             by default True.
         device_ids : Optional[List[int]], optional
             The device ids to use for DataParallel, by default None.
-        use_lcm_lora : bool, optional
-            Whether to use LCM-LoRA or not, by default True.
         use_tiny_vae : bool, optional
             Whether to use TinyVAE or not, by default True.
         enable_similar_image_filter : bool, optional
@@ -208,6 +201,35 @@ class StreamDiffusionWrapper:
         """
         if compile_engines_only:
             logger.info("compile_engines_only is True, will only compile engines and not load the model")
+        
+        # Handle backwards compatibility for use_lcm_lora parameter
+        if use_lcm_lora is not None:
+            logger.warning("use_lcm_lora parameter is deprecated. Use lora_dict instead.")
+            logger.warning("Automatically converting use_lcm_lora to lora_dict for backwards compatibility.")
+            
+            if use_lcm_lora and not self.sd_turbo:
+                # Initialize lora_dict if it doesn't exist
+                if lora_dict is None:
+                    lora_dict = {}
+                else:
+                    # Make a copy to avoid modifying the original
+                    lora_dict = lora_dict.copy()
+                
+                # Determine which LCM LoRA to use based on model path
+                model_path_lower = model_id_or_path.lower()
+                if any(indicator in model_path_lower for indicator in ['sdxl', 'xl', '1024']):
+                    lcm_lora_id = "latent-consistency/lcm-lora-sdxl"
+                    logger.info(f"Detected SDXL model, adding LCM LoRA: {lcm_lora_id}")
+                else:
+                    lcm_lora_id = "latent-consistency/lcm-lora-sdv1-5"
+                    logger.info(f"Detected SD1.5 model, adding LCM LoRA: {lcm_lora_id}")
+                
+                # Add LCM LoRA to lora_dict if not already present
+                if lcm_lora_id not in lora_dict:
+                    lora_dict[lcm_lora_id] = 1.0
+                    logger.info(f"Added {lcm_lora_id} with scale 1.0 to lora_dict")
+                else:
+                    logger.info(f"LCM LoRA {lcm_lora_id} already present in lora_dict with scale {lora_dict[lcm_lora_id]}")
             
         self.sd_turbo = "turbo" in model_id_or_path
         self.use_controlnet = use_controlnet
@@ -258,12 +280,10 @@ class StreamDiffusionWrapper:
         self.stream: StreamDiffusion = self._load_model(
             model_id_or_path=model_id_or_path,
             lora_dict=lora_dict,
-            lcm_lora_id=lcm_lora_id,
             vae_id=vae_id,
             t_index_list=t_index_list,
             acceleration=acceleration,
             do_add_noise=do_add_noise,
-            use_lcm_lora=use_lcm_lora,
             use_tiny_vae=use_tiny_vae,
             cfg_type=cfg_type,
             engine_dir=engine_dir,
@@ -884,11 +904,9 @@ class StreamDiffusionWrapper:
         model_id_or_path: str,
         t_index_list: List[int],
         lora_dict: Optional[Dict[str, float]] = None,
-        lcm_lora_id: Optional[str] = None,
         vae_id: Optional[str] = None,
         acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
         do_add_noise: bool = True,
-        use_lcm_lora: bool = True,
         use_tiny_vae: bool = True,
         cfg_type: Literal["none", "full", "self", "initialize"] = "self",
         engine_dir: Optional[Union[str, Path]] = "engines",
@@ -915,7 +933,7 @@ class StreamDiffusionWrapper:
         This method does the following:
 
         1. Loads the model from the model_id_or_path.
-        2. Loads and fuses the LCM-LoRA model from the lcm_lora_id if needed.
+        2. Loads and fuses LoRA models from lora_dict if provided.
         3. Loads the VAE model from the vae_id if needed.
         4. Enables acceleration if needed.
         5. Prepares the model for inference.
@@ -932,8 +950,7 @@ class StreamDiffusionWrapper:
             The lora_dict to load, by default None.
             Keys are the LoRA names and values are the LoRA scales.
             Example: {'LoRA_1' : 0.5 , 'LoRA_2' : 0.7 ,...}
-        lcm_lora_id : Optional[str], optional
-            The lcm_lora_id to load, by default None.
+            Use this to load LCM LoRA: {'latent-consistency/lcm-lora-sdv1-5': 1.0}
         vae_id : Optional[str], optional
             The vae_id to load, by default None.
         acceleration : Literal["none", "xfomers", "sfast", "tensorrt"], optional
@@ -943,8 +960,6 @@ class StreamDiffusionWrapper:
         do_add_noise : bool, optional
             Whether to add noise for following denoising steps or not,
             by default True.
-        use_lcm_lora : bool, optional
-            Whether to use LCM-LoRA or not, by default True.
         use_tiny_vae : bool, optional
             Whether to use TinyVAE or not, by default True.
         cfg_type : Literal["none", "full", "self", "initialize"],
@@ -1095,20 +1110,7 @@ class StreamDiffusionWrapper:
             lora_adapters_to_merge = []
             lora_scales_to_merge = []
             
-            # Collect all LoRA adapters and their scales
-            if use_lcm_lora:
-                if lcm_lora_id is not None:
-                    logger.info(f"_load_model: Loading LCM LoRA from {lcm_lora_id}")
-                    stream.pipe.load_lora_weights(lcm_lora_id, adapter_name="lcm_lora")
-                else:
-                    logger.info("_load_model: Loading default LCM LoRA")
-                    # Use appropriate default LCM LoRA based on model type
-                    default_lcm_lora = "latent-consistency/lcm-lora-sdxl" if is_sdxl else "latent-consistency/lcm-lora-sdv1-5"
-                    stream.pipe.load_lora_weights(default_lcm_lora, adapter_name="lcm_lora")
-                
-                lora_adapters_to_merge.append("lcm_lora")
-                lora_scales_to_merge.append(1.0)
-
+            # Collect all LoRA adapters and their scales from lora_dict
             if lora_dict is not None:
                 for i, (lora_name, lora_scale) in enumerate(lora_dict.items()):
                     adapter_name = f"custom_lora_{i}"
@@ -1298,7 +1300,6 @@ class StreamDiffusionWrapper:
                     max_batch_size=self.max_batch_size,
                     min_batch_size=self.min_batch_size,
                     mode=self.mode,
-                    use_lcm_lora=use_lcm_lora,
                     use_tiny_vae=use_tiny_vae,
                     lora_dict=lora_dict,
                     ipadapter_scale=ipadapter_scale,
@@ -1311,7 +1312,6 @@ class StreamDiffusionWrapper:
                     max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
                     min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
                     mode=self.mode,
-                    use_lcm_lora=use_lcm_lora,
                     use_tiny_vae=use_tiny_vae,
                     lora_dict=lora_dict,
                     ipadapter_scale=ipadapter_scale,
@@ -1324,7 +1324,6 @@ class StreamDiffusionWrapper:
                     max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
                     min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
                     mode=self.mode,
-                    use_lcm_lora=use_lcm_lora,
                     use_tiny_vae=use_tiny_vae,
                     lora_dict=lora_dict,
                     ipadapter_scale=ipadapter_scale,
@@ -1650,7 +1649,6 @@ class StreamDiffusionWrapper:
                     max_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
                     min_batch_size=self.batch_size if self.mode == "txt2img" else stream.frame_bff_size,
                     mode=self.mode,
-                    use_lcm_lora=use_lcm_lora,
                     use_tiny_vae=use_tiny_vae,
                 )
                 safety_checker_engine_exists = os.path.exists(safety_checker_path)

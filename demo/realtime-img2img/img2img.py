@@ -182,7 +182,6 @@ class Pipeline:
                 frame_buffer_size=1,
                 width=params.width,
                 height=params.height,
-                use_lcm_lora=False,
                 output_type="pt",
                 warmup=10,
                 vae_id=None,
