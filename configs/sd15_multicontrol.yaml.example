@@ -42,12 +42,16 @@ use_tiny_vae: true
 acceleration: "tensorrt"   # "xformers" for non-TensorRT setups
 cfg_type: "self"
 
+scheduler: "lcm" # Supports "lcm" or "tcd"
+sampler: "normal"
+
 # Engine directory for TensorRT (engines will be built here if not found)
 engine_dir: "./engines/sd15"
 
 # Enable multi-modal conditioning
 use_controlnet: true
 use_ipadapter: true
+use_ipadapter: false
 
 # IPAdapter configuration for style conditioning
 ipadapters:

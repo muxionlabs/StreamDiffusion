@@ -145,6 +145,8 @@ class StreamDiffusion:
 
     def _initialize_scheduler(self, scheduler_type: str, sampler_type: str, config):
         """Initialize scheduler based on type and sampler configuration."""
+
+        # TODO: More testing and validation required on samplers.
         # Map sampler types to configuration parameters
         sampler_config = {
             "simple": {"timestep_spacing": "linspace"},

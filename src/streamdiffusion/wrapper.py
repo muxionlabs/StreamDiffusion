@@ -85,7 +85,7 @@ class StreamDiffusionWrapper:
         acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
         do_add_noise: bool = True,
         device_ids: Optional[List[int]] = None,
-        use_lcm_lora: Optional[bool] = None,  # Backwards compatibility parameter
+        use_lcm_lora: Optional[bool] = None,  # DEPRECATED: Backwards compatibility parameter
         use_tiny_vae: bool = True,
         enable_similar_image_filter: bool = False,
         similar_image_filter_threshold: float = 0.98,
@@ -101,7 +101,7 @@ class StreamDiffusionWrapper:
         normalize_prompt_weights: bool = True,
         normalize_seed_weights: bool = True,
         # Scheduler and sampler options
-        scheduler: Literal["lcm", "dpm++ 2m", "uni_pc", "ddim", "euler"] = "lcm",
+        scheduler: Literal["lcm", "tcd"] = "lcm",
         sampler: Literal["simple", "sgm uniform", "normal", "ddim", "beta", "karras"] = "normal",
         # ControlNet options
         use_controlnet: bool = False,
@@ -126,6 +126,10 @@ class StreamDiffusionWrapper:
             The model id or path to load.
         t_index_list : List[int]
             The t_index_list to use for inference.
+        min_batch_size : int, optional
+            The minimum batch size for inference, by default 1.
+        max_batch_size : int, optional
+            The maximum batch size for inference, by default 4.
         lora_dict : Optional[Dict[str, float]], optional
             The lora_dict to load, by default None.
             Keys are the LoRA names and values are the LoRA scales.
@@ -140,6 +144,8 @@ class StreamDiffusionWrapper:
             ("madebyollin/taesd") will be used.
         device : Literal["cpu", "cuda"], optional
             The device to use for inference, by default "cuda".
+        device_ids : Optional[List[int]], optional
+            The device ids to use for DataParallel, by default None.
         dtype : torch.dtype, optional
             The dtype for inference, by default torch.float16.
         frame_buffer_size : int, optional
@@ -181,13 +187,19 @@ class StreamDiffusionWrapper:
             The seed, by default 2.
         use_safety_checker : bool, optional
             Whether to use safety checker or not, by default False.
+        skip_diffusion : bool, optional
+            Whether to skip diffusion and apply only preprocessing/postprocessing hooks, by default False.
+        engine_dir : Optional[Union[str, Path]], optional
+            Directory path for storing/loading TensorRT engines, by default "engines".
+        build_engines_if_missing : bool, optional
+            Whether to build TensorRT engines if they don't exist, by default True.
         normalize_prompt_weights : bool, optional
             Whether to normalize prompt weights in blending to sum to 1,
             by default True. When False, weights > 1 will amplify embeddings.
         normalize_seed_weights : bool, optional
             Whether to normalize seed weights in blending to sum to 1,
             by default True. When False, weights > 1 will amplify noise.
-        scheduler : Literal["lcm", "dpm++ 2m", "uni_pc", "ddim", "euler"], optional
+        scheduler : Literal["lcm", "tcd"], optional
             The scheduler type to use for denoising, by default "lcm".
         sampler : Literal["simple", "sgm uniform", "normal", "ddim", "beta", "karras"], optional
             The sampler type to use for noise scheduling, by default "normal".
@@ -197,6 +209,19 @@ class StreamDiffusionWrapper:
             ControlNet configuration(s), by default None.
             Can be a single config dict or list of config dicts for multiple ControlNets.
             Each config should contain: model_id, preprocessor (optional), conditioning_scale, etc.
+        use_ipadapter : bool, optional
+            Whether to enable IPAdapter support, by default False.
+        ipadapter_config : Optional[Union[Dict[str, Any], List[Dict[str, Any]]]], optional
+            IPAdapter configuration(s), by default None. Can be a single config dict
+            or list of config dicts for multiple IPAdapters.
+        image_preprocessing_config : Optional[Dict[str, Any]], optional
+            Configuration for image preprocessing hooks, by default None.
+        image_postprocessing_config : Optional[Dict[str, Any]], optional
+            Configuration for image postprocessing hooks, by default None.
+        latent_preprocessing_config : Optional[Dict[str, Any]], optional
+            Configuration for latent preprocessing hooks, by default None.
+        latent_postprocessing_config : Optional[Dict[str, Any]], optional
+            Configuration for latent postprocessing hooks, by default None.
         safety_checker_fallback_type : Literal["blank", "previous"], optional
             Whether to use a blank image or the previous image as a fallback, by default "previous".
         safety_checker_threshold: float, optional
@@ -809,33 +834,57 @@ class StreamDiffusionWrapper:
 
     def _denormalize_on_gpu(self, image_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Denormalize image tensor on GPU for efficiency
+        Denormalize image tensor on GPU for efficiency.
 
+        Converts image tensor from diffusion range [-1, 1] to standard image range [0, 1].
 
-        Args:
-            image_tensor: Input tensor on GPU
+        Parameters
+        ----------
+        image_tensor : torch.Tensor
+            Input tensor in diffusion range [-1, 1], expected to be on GPU.
 
-
-        Returns:
-            Denormalized tensor on GPU, clamped to [0,1]
+        Returns
+        -------
+        torch.Tensor
+            Denormalized tensor in range [0, 1], clamped and on GPU.
         """
         return (image_tensor / 2 + 0.5).clamp(0, 1)
 
     def _normalize_on_gpu(self, image_tensor: torch.Tensor) -> torch.Tensor:
-        """Convert tensor from [0,1] (processor range) back to [-1,1] (diffusion range)"""
+        """
+        Normalize tensor from processor range to diffusion range.
+
+        Converts image tensor from standard image range [0, 1] to diffusion range [-1, 1].
+
+        Parameters
+        ----------
+        image_tensor : torch.Tensor
+            Input tensor in standard image range [0, 1], expected to be on GPU.
+
+        Returns
+        -------
+        torch.Tensor
+            Normalized tensor in diffusion range [-1, 1], clamped and on GPU.
+        """
         return (image_tensor * 2 - 1).clamp(-1, 1)
 
     def _tensor_to_pil_optimized(self, image_tensor: torch.Tensor) -> List[Image.Image]:
         """
-        Optimized tensor to PIL conversion with minimal CPU transfers
+        Optimized tensor to PIL conversion with minimal CPU transfers.
 
+        Efficiently converts a batch of GPU tensors to PIL Images with minimal
+        CPU-GPU transfers and memory allocations.
 
-        Args:
-            image_tensor: Input tensor on GPU
+        Parameters
+        ----------
+        image_tensor : torch.Tensor
+            Input tensor in diffusion range [-1, 1], expected to be on GPU.
+            Shape should be (batch_size, channels, height, width).
 
-
-        Returns:
-            List of PIL Images
+        Returns
+        -------
+        List[Image.Image]
+            List of PIL RGB images, one for each item in the batch.
         """
         # Denormalize on GPU first
         denormalized = self._denormalize_on_gpu(image_tensor)
@@ -873,6 +922,23 @@ class StreamDiffusionWrapper:
         return pil_images
 
     def set_nsfw_fallback_img(self, height: int, width: int) -> None:
+        """
+        Set the NSFW fallback image used when safety checker blocks content.
+
+        Creates a black RGB image of the specified dimensions that will be returned
+        when the safety checker determines content should be blocked.
+
+        Parameters
+        ----------
+        height : int
+            Height of the fallback image in pixels.
+        width : int
+            Width of the fallback image in pixels.
+
+        Returns
+        -------
+        None
+        """
         self.nsfw_fallback_img = Image.new("RGB", (height, width), (0, 0, 0))
         if self.output_type == "pt":
             self.nsfw_fallback_img = torch.from_numpy(np.array(self.nsfw_fallback_img)).unsqueeze(0)
@@ -894,7 +960,7 @@ class StreamDiffusionWrapper:
         build_engines_if_missing: bool = True,
         normalize_prompt_weights: bool = True,
         normalize_seed_weights: bool = True,
-        scheduler: Literal["lcm", "dpm++ 2m", "uni_pc", "ddim", "euler"] = "lcm",
+        scheduler: Literal["lcm", "tcd"] = "lcm",
         sampler: Literal["simple", "sgm uniform", "normal", "ddim", "beta", "karras"] = "normal",
         use_controlnet: bool = False,
         controlnet_config: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = None,
@@ -924,41 +990,72 @@ class StreamDiffusionWrapper:
         Parameters
         ----------
         model_id_or_path : str
-            The model id or path to load.
+            The model id or path to load. Can be a Hugging Face model ID, local path to
+            safetensors/ckpt file, or directory containing model files.
         t_index_list : List[int]
-            The t_index_list to use for inference.
+            The t_index_list to use for inference. Specifies which denoising timesteps
+            to use from the diffusion schedule.
         lora_dict : Optional[Dict[str, float]], optional
             The lora_dict to load, by default None.
             Keys are the LoRA names and values are the LoRA scales.
             Example: {'LoRA_1' : 0.5 , 'LoRA_2' : 0.7 ,...}
             Use this to load LCM LoRA: {'latent-consistency/lcm-lora-sdv1-5': 1.0}
         vae_id : Optional[str], optional
-            The vae_id to load, by default None.
-        acceleration : Literal["none", "xfomers", "sfast", "tensorrt"], optional
-            The acceleration method, by default "tensorrt".
-        warmup : int, optional
-            The number of warmup steps to perform, by default 10.
+            The vae_id to load, by default None. If None, uses default TinyVAE
+            ("madebyollin/taesd" for SD1.5, "madebyollin/taesdxl" for SDXL).
+        acceleration : Literal["none", "xformers", "tensorrt"], optional
+            The acceleration method, by default "tensorrt". Note: docstring shows
+            "xfomers" and "sfast" but code uses "xformers".
         do_add_noise : bool, optional
             Whether to add noise for following denoising steps or not,
             by default True.
         use_lcm_lora : bool, optional
-            Whether to use LCM-LoRA or not, by default True. # DEPRECATED: Backwards compatibility
+            DEPRECATED: Use lora_dict instead. For backwards compatibility only.
+            If True, automatically adds appropriate LCM LoRA to lora_dict based on model type.
+            SDXL models get "latent-consistency/lcm-lora-sdxl", others get "latent-consistency/lcm-lora-sdv1-5".
+            By default None (ignored).
         use_tiny_vae : bool, optional
-            Whether to use TinyVAE or not, by default True.
-        cfg_type : Literal["none", "full", "self", "initialize"],
-        optional
+            Whether to use TinyVAE or not, by default True. TinyVAE is a distilled,
+            smaller VAE model that provides faster encoding/decoding with minimal quality loss.
+        cfg_type : Literal["none", "full", "self", "initialize"], optional
             The cfg_type for img2img mode, by default "self".
             You cannot use anything other than "none" for txt2img mode.
-        seed : int, optional
-            The seed, by default 2.
+        engine_dir : Optional[Union[str, Path]], optional
+            Directory path for storing/loading TensorRT engines, by default "engines".
+        build_engines_if_missing : bool, optional
+            Whether to build TensorRT engines if they don't exist, by default True.
+        normalize_prompt_weights : bool, optional
+            Whether to normalize prompt weights in blending to sum to 1, by default True.
+            When False, weights > 1 will amplify embeddings.
+        normalize_seed_weights : bool, optional
+            Whether to normalize seed weights in blending to sum to 1, by default True.
+            When False, weights > 1 will amplify noise.
+        scheduler : Literal["lcm", "tcd"], optional
+            The scheduler type to use for denoising, by default "lcm".
+        sampler : Literal["simple", "sgm uniform", "normal", "ddim", "beta", "karras"], optional
+            The sampler type to use for noise scheduling, by default "normal".
         use_controlnet : bool, optional
-            Whether to apply ControlNet patch, by default False.
+            Whether to enable ControlNet support, by default False.
         controlnet_config : Optional[Union[Dict[str, Any], List[Dict[str, Any]]]], optional
-            ControlNet configuration(s), by default None.
+            ControlNet configuration(s), by default None. Can be a single config dict
+            or list of config dicts for multiple ControlNets.
         use_ipadapter : bool, optional
-            Whether to apply IPAdapter patch, by default False.
+            Whether to enable IPAdapter support, by default False.
         ipadapter_config : Optional[Union[Dict[str, Any], List[Dict[str, Any]]]], optional
-            IPAdapter configuration(s), by default None.
+            IPAdapter configuration(s), by default None. Can be a single config dict
+            or list of config dicts for multiple IPAdapters.
+        image_preprocessing_config : Optional[Dict[str, Any]], optional
+            Configuration for image preprocessing hooks, by default None.
+        image_postprocessing_config : Optional[Dict[str, Any]], optional
+            Configuration for image postprocessing hooks, by default None.
+        latent_preprocessing_config : Optional[Dict[str, Any]], optional
+            Configuration for latent preprocessing hooks, by default None.
+        latent_postprocessing_config : Optional[Dict[str, Any]], optional
+            Configuration for latent postprocessing hooks, by default None.
+        safety_checker_model_id : Optional[str], optional
+            Model ID for the safety checker, by default "Freepik/nsfw_image_detector".
+        compile_engines_only : bool, optional
+            Whether to only compile engines and not load the model, by default False.
 
         Returns
         -------

@@ -32,6 +32,9 @@ use_tiny_vae: true
 acceleration: "tensorrt"    # "xformers" for non-TensorRT setups
 cfg_type: "self"
 
+scheduler: "lcm" # Supports "lcm" or "tcd"
+sampler: "normal"
+
 # Engine directory for TensorRT
 engine_dir: "./engines/sdturbo"
 

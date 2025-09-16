@@ -41,6 +41,10 @@ use_taesd: true             # Use Tiny AutoEncoder for SDXL
 use_tiny_vae: true
 acceleration: "tensorrt"    # "xformers" for non-TensorRT setups
 cfg_type: "self"
+
+scheduler: "lcm" # Supports "lcm" or "tcd"
+sampler: "normal"
+
 safety_checker: false
 
 # Engine directory for TensorRT
