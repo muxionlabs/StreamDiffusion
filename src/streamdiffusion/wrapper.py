@@ -1149,6 +1149,11 @@ class StreamDiffusionWrapper:
                 pipe.text_encoder = pipe.text_encoder.to(device=self.device)
             if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
                 pipe.text_encoder_2 = pipe.text_encoder_2.to(device=self.device)
+            # Move main pipeline components to device, but skip UNet for TensorRT
+            if hasattr(pipe, "unet") and pipe.unet is not None and acceleration != "tensorrt":
+                pipe.unet = pipe.unet.to(device=self.device)
+            if hasattr(pipe, "vae") and pipe.vae is not None and acceleration != "tensorrt":
+                pipe.vae = pipe.vae.to(device=self.device)
 
         # If we get here, the model loaded successfully - break out of retry loop
         logger.info(f"Model loading succeeded")
@@ -1267,11 +1272,15 @@ class StreamDiffusionWrapper:
 
         if use_tiny_vae:
             if vae_id is not None:
-                stream.vae = AutoencoderTiny.from_pretrained(vae_id).to(dtype=pipe.dtype)
+                stream.vae = AutoencoderTiny.from_pretrained(vae_id).to(dtype=pipe.dtype, device=self.device)
             else:
                 # Use TAESD XL for SDXL models, regular TAESD for SD 1.5
                 taesd_model = "madebyollin/taesdxl" if is_sdxl else "madebyollin/taesd"
-                stream.vae = AutoencoderTiny.from_pretrained(taesd_model).to(dtype=pipe.dtype)
+                stream.vae = AutoencoderTiny.from_pretrained(taesd_model).to(dtype=pipe.dtype, device=self.device)
+        elif acceleration != "tensorrt":
+            # For non-TensorRT acceleration, ensure VAE is on device if it wasn't moved earlier
+            if hasattr(pipe, "vae") and pipe.vae is not None:
+                pipe.vae = pipe.vae.to(device=self.device)
 
         try:
             if acceleration == "xformers":
@@ -1920,7 +1929,6 @@ class StreamDiffusionWrapper:
 
         return stream
 
-
     def get_last_processed_image(self, index: int) -> Optional[Image.Image]:
         """Forward get_last_processed_image call to the underlying ControlNet pipeline"""
         if not self.use_controlnet:
@@ -1945,14 +1953,12 @@ class StreamDiffusionWrapper:
         else:
             logger.debug("update_control_image: Skipping ControlNet update in skip diffusion mode")
 
-
     def update_style_image(self, image: Union[str, Image.Image, torch.Tensor]) -> None:
         """Update IPAdapter style image"""
         if not self.use_ipadapter:
             raise RuntimeError("update_style_image: IPAdapter support not enabled. Set use_ipadapter=True in constructor.")
         self.stream.update_style_image(image)
         
-
     def clear_caches(self) -> None:
         """Clear all cached prompt embeddings and seed noise tensors."""
         self.stream._param_updater.clear_caches()
