@@ -27,7 +27,7 @@ def run(
     lora_dict: Optional[Dict[str, float]] = None,
     prompt: str = "1girl with brown dog hair, thick glasses, smiling",
     negative_prompt: str = "bad image , bad quality",
-    lcm_lora: bool = True,
+    use_lcm_lora: bool = True,
     use_tiny_vae: bool = True,
     width: int = 512,
     height: int = 512,
@@ -54,7 +54,7 @@ def run(
         The prompt to use, by default "1girl with brown dog hair, thick glasses, smiling".
     negative_prompt : str, optional
         The negative prompt to use, by default "bad image , bad quality".
-    lcm_lora : bool, optional
+    use_lcm_lora : bool, optional
         Whether to use LCM-LoRA or not, by default True.
     use_tiny_vae : bool, optional
         Whether to use TinyVAE or not, by default True.
@@ -84,7 +84,7 @@ def run(
         warmup=warmup,
         acceleration=acceleration,
         device_ids=device_ids,
-        lora_dict={"latent-consistency/lcm-lora-sdv1-5": 1.0} if lcm_lora else lora_dict,
+        use_lcm_lora=use_lcm_lora,
         use_tiny_vae=use_tiny_vae,
         enable_similar_image_filter=False,
         similar_image_filter_threshold=0.98,
