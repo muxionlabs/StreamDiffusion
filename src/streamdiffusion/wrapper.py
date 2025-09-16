@@ -157,6 +157,11 @@ class StreamDiffusionWrapper:
             by default True.
         device_ids : Optional[List[int]], optional
             The device ids to use for DataParallel, by default None.
+        use_lcm_lora : Optional[bool], optional
+            DEPRECATED: Use lora_dict instead. For backwards compatibility only.
+            If True, automatically adds appropriate LCM LoRA to lora_dict based on model type.
+            SDXL models get "latent-consistency/lcm-lora-sdxl", others get "latent-consistency/lcm-lora-sdv1-5".
+            By default None (ignored).
         use_tiny_vae : bool, optional
             Whether to use TinyVAE or not, by default True.
         enable_similar_image_filter : bool, optional
@@ -202,35 +207,9 @@ class StreamDiffusionWrapper:
         if compile_engines_only:
             logger.info("compile_engines_only is True, will only compile engines and not load the model")
         
-        # Handle backwards compatibility for use_lcm_lora parameter
-        if use_lcm_lora is not None:
-            logger.warning("use_lcm_lora parameter is deprecated. Use lora_dict instead.")
-            logger.warning("Automatically converting use_lcm_lora to lora_dict for backwards compatibility.")
-            
-            if use_lcm_lora and not self.sd_turbo:
-                # Initialize lora_dict if it doesn't exist
-                if lora_dict is None:
-                    lora_dict = {}
-                else:
-                    # Make a copy to avoid modifying the original
-                    lora_dict = lora_dict.copy()
-                
-                # Determine which LCM LoRA to use based on model path
-                model_path_lower = model_id_or_path.lower()
-                if any(indicator in model_path_lower for indicator in ['sdxl', 'xl', '1024']):
-                    lcm_lora_id = "latent-consistency/lcm-lora-sdxl"
-                    logger.info(f"Detected SDXL model, adding LCM LoRA: {lcm_lora_id}")
-                else:
-                    lcm_lora_id = "latent-consistency/lcm-lora-sdv1-5"
-                    logger.info(f"Detected SD1.5 model, adding LCM LoRA: {lcm_lora_id}")
-                
-                # Add LCM LoRA to lora_dict if not already present
-                if lcm_lora_id not in lora_dict:
-                    lora_dict[lcm_lora_id] = 1.0
-                    logger.info(f"Added {lcm_lora_id} with scale 1.0 to lora_dict")
-                else:
-                    logger.info(f"LCM LoRA {lcm_lora_id} already present in lora_dict with scale {lora_dict[lcm_lora_id]}")
-            
+        # Store use_lcm_lora for backwards compatibility processing in _load_model
+        self.use_lcm_lora = use_lcm_lora
+
         self.sd_turbo = "turbo" in model_id_or_path
         self.use_controlnet = use_controlnet
         self.use_ipadapter = use_ipadapter
@@ -284,6 +263,7 @@ class StreamDiffusionWrapper:
             t_index_list=t_index_list,
             acceleration=acceleration,
             do_add_noise=do_add_noise,
+            use_lcm_lora=use_lcm_lora, # Deprecated:Backwards compatibility
             use_tiny_vae=use_tiny_vae,
             cfg_type=cfg_type,
             engine_dir=engine_dir,
@@ -907,6 +887,7 @@ class StreamDiffusionWrapper:
         vae_id: Optional[str] = None,
         acceleration: Literal["none", "xformers", "tensorrt"] = "tensorrt",
         do_add_noise: bool = True,
+        use_lcm_lora: bool = True,
         use_tiny_vae: bool = True,
         cfg_type: Literal["none", "full", "self", "initialize"] = "self",
         engine_dir: Optional[Union[str, Path]] = "engines",
@@ -960,6 +941,8 @@ class StreamDiffusionWrapper:
         do_add_noise : bool, optional
             Whether to add noise for following denoising steps or not,
             by default True.
+        use_lcm_lora : bool, optional
+            Whether to use LCM-LoRA or not, by default True. # DEPRECATED: Backwards compatibility
         use_tiny_vae : bool, optional
             Whether to use TinyVAE or not, by default True.
         cfg_type : Literal["none", "full", "self", "initialize"],
@@ -1087,6 +1070,26 @@ class StreamDiffusionWrapper:
         self._is_sdxl = is_sdxl
         
         logger.info(f"_load_model: Detected model type: {model_type} (confidence: {confidence:.2f})")
+        
+        # DEPRECATED: THIS WILL LOAD LCM_LORA IF USE_LCM_LORA IS TRUE
+        # Validate backwards compatibility LCM LoRA selection using proper model detection
+        if hasattr(self, 'use_lcm_lora') and self.use_lcm_lora is not None:
+            if self.use_lcm_lora and not self.sd_turbo and lora_dict is not None:
+                # Determine correct LCM LoRA based on actual model detection
+                lcm_lora = "latent-consistency/lcm-lora-sdxl" if is_sdxl else "latent-consistency/lcm-lora-sdv1-5"
+
+                # Add to lora_dict if not already present
+                if lcm_lora not in lora_dict:
+                    lora_dict[lcm_lora] = 1.0
+                    logger.info(f"Added {lcm_lora} with scale 1.0 to lora_dict")
+                else:
+                    logger.info(f"LCM LoRA {lcm_lora} already present in lora_dict with scale {lora_dict[lcm_lora]}")
+            else:
+                logger.info(f"LCM LoRA will not be loaded because use_lcm_lora is {self.use_lcm_lora} and sd_turbo is {self.sd_turbo}")
+                
+                # Remove use_lcm_lora from self
+                self.use_lcm_lora = None
+                logger.info(f"use_lcm_lora has been removed from self")
 
         stream = StreamDiffusion(
             pipe=pipe,
