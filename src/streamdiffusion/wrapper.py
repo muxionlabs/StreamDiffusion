@@ -1210,65 +1210,49 @@ class StreamDiffusionWrapper:
             scheduler=scheduler,
             sampler=sampler,
         )
+
+        
         # Load and properly merge LoRA weights using the standard diffusers approach
-        if not self.sd_turbo:
-            lora_adapters_to_merge = []
-            lora_scales_to_merge = []
-            
-            # Collect all LoRA adapters and their scales from lora_dict
-            if lora_dict is not None:
-                for i, (lora_name, lora_scale) in enumerate(lora_dict.items()):
-                    adapter_name = f"custom_lora_{i}"
-                    logger.info(f"_load_model: Loading LoRA '{lora_name}' with scale {lora_scale}")
-                    
-                    try:
-                        # Load LoRA weights with unique adapter name
-                        stream.pipe.load_lora_weights(lora_name, adapter_name=adapter_name)
-                        lora_adapters_to_merge.append(adapter_name)
-                        lora_scales_to_merge.append(lora_scale)
-                        logger.info(f"Successfully loaded LoRA adapter: {adapter_name}")
-                    except Exception as e:
-                        logger.error(f"Failed to load LoRA {lora_name}: {e}")
-                        # Continue with other LoRAs even if one fails
-                        continue
-            
-            # Merge all LoRA adapters using the proper diffusers method
-            if lora_adapters_to_merge:
+        lora_adapters_to_merge = []
+        lora_scales_to_merge = []
+        
+        # Collect all LoRA adapters and their scales from lora_dict
+        if lora_dict is not None:
+            for i, (lora_name, lora_scale) in enumerate(lora_dict.items()):
+                adapter_name = f"custom_lora_{i}"
+                logger.info(f"_load_model: Loading LoRA '{lora_name}' with scale {lora_scale}")
+                
                 try:
-                    logger.info(f"Merging {len(lora_adapters_to_merge)} LoRA adapter(s) with scales: {lora_scales_to_merge}")
-                    
-                    # Use the proper merge_and_unload method from diffusers
-                    # This permanently merges LoRA weights into the base model parameters
-                    stream.pipe.fuse_lora(lora_scale=lora_scales_to_merge, adapter_names=lora_adapters_to_merge)
-                    
-                    # After fusing, unload the LoRA weights to clean up memory and avoid conflicts
-                    stream.pipe.unload_lora_weights()
-                    
-                    logger.info("Successfully merged and unloaded LoRA weights using diffusers merge_and_unload")
-                    
+                    # Load LoRA weights with unique adapter name
+                    stream.pipe.load_lora_weights(lora_name, adapter_name=adapter_name)
+                    lora_adapters_to_merge.append(adapter_name)
+                    lora_scales_to_merge.append(lora_scale)
+                    logger.info(f"Successfully loaded LoRA adapter: {adapter_name}")
                 except Exception as e:
-                    logger.error(f"Failed to merge LoRA weights: {e}")
-                    logger.info("Attempting fallback: individual LoRA merging...")
-                    
-                    # Fallback: merge LoRAs individually
-                    try:
-                        for adapter_name, scale in zip(lora_adapters_to_merge, lora_scales_to_merge):
-                            logger.info(f"Merging individual LoRA: {adapter_name} with scale {scale}")
-                            stream.pipe.fuse_lora(lora_scale=scale, adapter_names=[adapter_name])
-                        
-                        # Clean up after individual merging
-                        stream.pipe.unload_lora_weights()
-                        logger.info("Successfully merged LoRAs individually")
-                        
-                    except Exception as fallback_error:
-                        logger.error(f"LoRA merging fallback also failed: {fallback_error}")
-                        logger.warning("Continuing without LoRA merging - LoRAs may not be applied correctly")
-                        
-                        # Clean up any partial state
-                        try:
-                            stream.pipe.unload_lora_weights()
-                        except:
-                            pass
+                    logger.error(f"Failed to load LoRA {lora_name}: {e}")
+                    # Continue with other LoRAs even if one fails
+                    continue
+        
+        # Merge all LoRA adapters using the proper diffusers method
+        if lora_adapters_to_merge:
+            try:
+                for adapter_name, scale in zip(lora_adapters_to_merge, lora_scales_to_merge):
+                    logger.info(f"Merging individual LoRA: {adapter_name} with scale {scale}")
+                    stream.pipe.fuse_lora(lora_scale=scale, adapter_names=[adapter_name])
+                
+                # Clean up after individual merging
+                stream.pipe.unload_lora_weights()
+                logger.info("Successfully merged LoRAs individually")
+                
+            except Exception as fallback_error:
+                logger.error(f"LoRA merging fallback also failed: {fallback_error}")
+                logger.warning("Continuing without LoRA merging - LoRAs may not be applied correctly")
+                
+                # Clean up any partial state
+                try:
+                    stream.pipe.unload_lora_weights()
+                except:
+                    pass
 
         if use_tiny_vae:
             if vae_id is not None:
