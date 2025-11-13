@@ -18,6 +18,8 @@ StreamDiffusion is an innovative diffusion pipeline designed for real-time inter
 
 We sincerely thank [Taku Fujimoto](https://twitter.com/AttaQjp) and [Radamés Ajna](https://twitter.com/radamar) and Hugging Face team for their invaluable feedback, courteous support, and insightful discussions.
 
+> **Project lineage:** This repository builds on the original [StreamDiffusion project](https://github.com/cumulo-autumn/StreamDiffusion). All of our additions sit on top of that excellent foundation, and we remain grateful to the upstream authors for their work.
+
 ## Key Features
 
 1. **Stream Batch**
@@ -63,12 +65,20 @@ Feel free to explore each feature by following the provided links to learn more 
 }
 ```
 
+## Daydream Extensions
+
+- **Composable processor pipelines:** `StreamDiffusionWrapper` now accepts `image_preprocessing`, `image_postprocessing`, `latent_preprocessing`, and `latent_postprocessing` configs, letting you chain multiple processors (e.g. `latent_feedback`, `realesrgan_trt` upscaler, `blur`, etc) or run them standalone with `skip_diffusion`. Refer to `src/streamdiffusion/preprocessing/processors` for documentation on available processors.
+- **Prompt and seed blending at runtime:** The wrapper supports weighted prompt lists, seed interpolation, caching, and on-the-fly updates through `update_stream_params`, enabling smooth transitions without reloading models.
+- **ControlNet and IP-Adapter orchestration:** Multiple ControlNets or IP-Adapters can be attached, reconfigured, and TensorRT-accelerated, with live updates handled via the wrapper’s parameter updater.
+- **TemporalNet ControlNet support:** Built-in configs for TemporalNet v2 (optical-flow driven ControlNet) help keep motion coherent across frames; see `configs/*.yaml` for pairings and tuning guidance.
+- **TensorRT-first deployment tooling:** Enhanced engine management supports dynamic engines that span resolution ranges, min/max batch sizing, compile-only flows, an optional TensorRT safety checker, and extras flags so you can `pip install streamdiffusion[tensorrt,controlnet,ipadapter]` to grab only what you need.
+
 ## Installation
 
 ### Step0: clone this repository
 
 ```bash
-git clone https://github.com/cumulo-autumn/StreamDiffusion.git
+git clone https://github.com/daydreamlive/StreamDiffusion.git
 ```
 
 ### Step1: Make Environment
@@ -112,19 +122,14 @@ details: https://pytorch.org/
 
 #### For User
 
-Install StreamDiffusion
+Install StreamDiffusion with the extras you need (omit any extras you do not plan to use):
 
 ```bash
-#for Latest Version (recommended)
-pip install git+https://github.com/cumulo-autumn/StreamDiffusion.git@main#egg=streamdiffusion[tensorrt]
-
-
-#or
-
-
-#for Stable Version
-pip install streamdiffusion[tensorrt]
+# Latest (recommended)
+pip install "git+https://github.com/daydreamlive/StreamDiffusion.git@main#egg=streamdiffusion[tensorrt,controlnet,ipadapter]"
 ```
+
+You can install only the extras you need, e.g. `pip install "git+https://github.com/daydreamlive/StreamDiffusion.git@main#egg=streamdiffusion[tensorrt]"` or `...#egg=streamdiffusion[controlnet]`.
 
 Install TensorRT extension
 
@@ -132,23 +137,20 @@ Install TensorRT extension
 python -m streamdiffusion.tools.install-tensorrt
 ```
 
-(Only for Windows) You may need to install pywin32 additionally, if you installed Stable Version(`pip install streamdiffusion[tensorrt]`).
-
-```bash
-pip install --force-reinstall pywin32
-```
+This script installs the TensorRT runtime and plugins we validate with our demos; rerun it whenever CUDA or driver versions change.
 
 #### For Developer
 
 ```bash
-python setup.py develop easy_install streamdiffusion[tensorrt]
+# Editable install with optional extras
+pip install -e ".[tensorrt,controlnet,ipadapter]"
 python -m streamdiffusion.tools.install-tensorrt
 ```
 
 ### Docker Installation (TensorRT Ready)
 
 ```bash
-git clone https://github.com/cumulo-autumn/StreamDiffusion.git
+git clone https://github.com/daydreamlive/StreamDiffusion.git
 cd StreamDiffusion
 docker build -t stream-diffusion:latest -f Dockerfile .
 docker run --gpus all -it -v $(pwd):/home/ubuntu/streamdiffusion stream-diffusion:latest
@@ -172,7 +174,17 @@ There is an interactive txt2img demo in [`demo/realtime-txt2img`](./demo/realtim
 
 ## Real-Time Img2Img Demo
 
-There is a real time img2img demo with a live webcam feed or screen capture on a web browser in [`demo/realtime-img2img`](./demo/realtime-img2img) directory!
+There is a real time img2img demo with a live webcam feed or screen capture on a web browser in [`demo/realtime-img2img`](./demo/realtime-img2img) directory! It is our primary integration test app and exposes the latest ControlNet, IP-Adapter, and processor features. The demo expects Python 3.10 and Node.js 18+.
+
+To try it quickly:
+
+```bash
+cd demo/realtime-img2img
+chmod +x start.sh
+./start.sh
+```
+
+The script builds the frontend and launches `main.py` (TensorRT-ready by default). Pass `--controlnet-config` or see the [demo README](./demo/realtime-img2img/README.md) for advanced modes.
 
 <p align="center">
   <img src="./assets/img2img1.gif" width=100%>
@@ -396,6 +408,6 @@ SD-Turbo is also available on [Hugging Face Space](https://huggingface.co/stabil
 
 ## Contributors
 
-<a href="https://github.com/cumulo-autumn/StreamDiffusion/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=cumulo-autumn/StreamDiffusion" />
+<a href="https://github.com/daydreamlive/StreamDiffusion/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=daydreamlive/StreamDiffusion" />
 </a>
