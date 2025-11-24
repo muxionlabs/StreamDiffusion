@@ -1179,7 +1179,10 @@ class StreamDiffusionWrapper:
         # DEPRECATED: THIS WILL LOAD LCM_LORA IF USE_LCM_LORA IS TRUE
         # Validate backwards compatibility LCM LoRA selection using proper model detection
         if hasattr(self, 'use_lcm_lora') and self.use_lcm_lora is not None:
-            if self.use_lcm_lora and not self.sd_turbo and lora_dict is not None:
+            if self.use_lcm_lora and not self.sd_turbo:
+                if lora_dict is None:
+                    lora_dict = {}
+
                 # Determine correct LCM LoRA based on actual model detection
                 lcm_lora = "latent-consistency/lcm-lora-sdxl" if is_sdxl else "latent-consistency/lcm-lora-sdv1-5"
 
