@@ -49,7 +49,7 @@ if any(cmd in sys.argv for cmd in ("install", "develop")):
 _deps = [
     f"cuda-python{get_cuda_constraint()}",
     "xformers==0.0.30",
-    "diffusers==0.35.0",
+    "diffusers @ git+https://github.com/varshith15/diffusers.git@3e3b72f557e91546894340edabc845e894f00922",
     "transformers==4.56.0",
     "accelerate==1.10.0",
     "huggingface_hub==0.35.0",
@@ -59,6 +59,7 @@ _deps = [
     "onnx==1.18.0",
     "onnxruntime==1.23.2",
     "onnxruntime-gpu==1.23.2",
+    "polygraphy==0.49.24",
     "protobuf==4.25.3",
     "colored==2.2.4",
     "pywin32==306;sys_platform == 'win32'",
@@ -81,11 +82,11 @@ def deps_list(*pkgs):
 extras = {}
 extras["xformers"] = deps_list("xformers")
 extras["torch"] = deps_list("torch", "accelerate")
-extras["tensorrt"] = deps_list("protobuf", "cuda-python", "onnx", "onnxruntime", "onnxruntime-gpu", "colored")
+extras["tensorrt"] = deps_list("protobuf", "cuda-python", "onnx", "onnxruntime", "onnxruntime-gpu", "colored", "polygraphy", "onnx-graphsurgeon")
 extras["controlnet"] = deps_list("onnx-graphsurgeon", "controlnet-aux")
 extras["ipadapter"] = deps_list("diffusers-ipadapter", "mediapipe", "insightface")
 
-extras["dev"] = extras["xformers"] + extras["torch"] + extras["tensorrt"]
+extras["dev"] = extras["xformers"] + extras["torch"] + extras["tensorrt"] + extras["controlnet"]
 
 install_requires = [
     deps["fire"],

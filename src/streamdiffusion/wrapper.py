@@ -116,6 +116,11 @@ class StreamDiffusionWrapper:
         latent_postprocessing_config: Optional[Dict[str, Any]] = None,
         safety_checker_fallback_type: Literal["blank", "previous"] = "previous",
         safety_checker_threshold: float = 0.5,
+        use_cached_attn: bool = False,
+        cache_maxframes: int = 1,
+        cache_interval: int = 1,
+        min_cache_maxframes: int = 1,
+        max_cache_maxframes: int = 4,
     ):
         """
         Initializes the StreamDiffusionWrapper.
@@ -228,6 +233,12 @@ class StreamDiffusionWrapper:
             The threshold for the safety checker, by default 0.5.
         compile_engines_only : bool, optional
             Whether to only compile engines and not load the model, by default False.
+        use_cached_attn : bool, optional
+            Whether to use cached attention or not, by default True.
+        cache_maxframes : int, optional
+            The maximum number of frames to cache, by default 1.
+        cache_interval : int, optional
+            The interval to cache the frames, by default 1.
         """
         if compile_engines_only:
             logger.info("compile_engines_only is True, will only compile engines and not load the model")
@@ -311,6 +322,11 @@ class StreamDiffusionWrapper:
             latent_preprocessing_config=latent_preprocessing_config,
             latent_postprocessing_config=latent_postprocessing_config,
             compile_engines_only=compile_engines_only,
+            use_cached_attn=use_cached_attn,
+            cache_maxframes=cache_maxframes,
+            cache_interval=cache_interval,
+            min_cache_maxframes=min_cache_maxframes,
+            max_cache_maxframes=max_cache_maxframes,
         )
 
         # Store skip_diffusion on wrapper for execution flow control
@@ -532,6 +548,8 @@ class StreamDiffusionWrapper:
         latent_postprocessing_config: Optional[List[Dict[str, Any]]] = None,
         use_safety_checker: Optional[bool] = None,
         safety_checker_threshold: Optional[float] = None,
+        cache_maxframes: Optional[int] = None,
+        cache_interval: Optional[int] = None,
     ) -> None:
         """
         Update streaming parameters efficiently in a single call.
@@ -598,6 +616,8 @@ class StreamDiffusionWrapper:
             image_postprocessing_config=image_postprocessing_config,
             latent_preprocessing_config=latent_preprocessing_config,
             latent_postprocessing_config=latent_postprocessing_config,
+            cache_maxframes=cache_maxframes,
+            cache_interval=cache_interval,
         )
         if use_safety_checker is not None:
             self.use_safety_checker = use_safety_checker and (self._acceleration == "tensorrt")
@@ -976,6 +996,11 @@ class StreamDiffusionWrapper:
         latent_postprocessing_config: Optional[Dict[str, Any]] = None,
         safety_checker_model_id: Optional[str] = "Freepik/nsfw_image_detector",
         compile_engines_only: bool = False,
+        use_cached_attn: bool = False,
+        cache_maxframes: int = 1,
+        cache_interval: int = 1,
+        min_cache_maxframes: int = 1,
+        max_cache_maxframes: int = 4,
     ) -> StreamDiffusion:
         """
         Loads the model.
@@ -1194,10 +1219,24 @@ class StreamDiffusionWrapper:
                     logger.info(f"LCM LoRA {lcm_lora} already present in lora_dict with scale {lora_dict[lcm_lora]}")
             else:
                 logger.info(f"LCM LoRA will not be loaded because use_lcm_lora is {self.use_lcm_lora} and sd_turbo is {self.sd_turbo}")
-                
+
                 # Remove use_lcm_lora from self
                 self.use_lcm_lora = None
                 logger.info(f"use_lcm_lora has been removed from self")
+
+        if use_cached_attn:
+            from streamdiffusion.acceleration.tensorrt.models.utils import create_kvo_cache
+            kvo_cache, kvo_cache_structure = create_kvo_cache(pipe.unet,
+                                                            batch_size=self.batch_size,
+                                                            cache_maxframes=cache_maxframes,
+                                                            height=self.height,
+                                                            width=self.width,
+                                                            device=self.device,
+                                                            dtype=self.dtype)
+        else:
+            kvo_cache = []
+            kvo_cache_structure = []
+
 
         stream = StreamDiffusion(
             pipe=pipe,
@@ -1215,6 +1254,9 @@ class StreamDiffusionWrapper:
             normalize_seed_weights=normalize_seed_weights,
             scheduler=scheduler,
             sampler=sampler,
+            kvo_cache=kvo_cache,
+            cache_interval=cache_interval,
+            cache_maxframes=cache_maxframes,
         )
 
         
@@ -1291,8 +1333,6 @@ class StreamDiffusionWrapper:
                     extract_unet_architecture,
                     validate_architecture
                 )
-                from streamdiffusion.acceleration.tensorrt.export_wrappers.unet_controlnet_export import create_controlnet_wrapper
-                from streamdiffusion.acceleration.tensorrt.export_wrappers.unet_ipadapter_export import create_ipadapter_wrapper
 
                 # Legacy TensorRT implementation (fallback)
                 # Initialize engine manager
@@ -1403,7 +1443,8 @@ class StreamDiffusionWrapper:
                     lora_dict=lora_dict,
                     ipadapter_scale=ipadapter_scale,
                     ipadapter_tokens=ipadapter_tokens,
-                    is_faceid=is_faceid if use_ipadapter_trt else None
+                    is_faceid=is_faceid if use_ipadapter_trt else None,
+                    use_cached_attn=use_cached_attn,
                 )
                 vae_encoder_path = engine_manager.get_engine_path(
                     EngineType.VAE_ENCODER,
@@ -1546,6 +1587,7 @@ class StreamDiffusionWrapper:
                             pass
 
                 unet_model = UNet(
+                    stream.unet,
                     fp16=True,
                     device=self.device,
                     max_batch_size=self.max_batch_size,
@@ -1559,6 +1601,10 @@ class StreamDiffusionWrapper:
                     num_ip_layers=num_ip_layers if use_ipadapter_trt else None,
                     image_height=self.height,
                     image_width=self.width,
+                    use_cached_attn=use_cached_attn,
+                    cache_maxframes=cache_maxframes,
+                    min_cache_maxframes=min_cache_maxframes,
+                    max_cache_maxframes=max_cache_maxframes,
                 )
 
                 # Use ControlNet wrapper if ControlNet support is enabled
@@ -1574,8 +1620,19 @@ class StreamDiffusionWrapper:
                     use_controlnet=use_controlnet_trt,
                     use_ipadapter=use_ipadapter_trt,
                     control_input_names=control_input_names,
-                    num_tokens=num_tokens
+                    num_tokens=num_tokens,
+                    kvo_cache_structure=kvo_cache_structure,
                 )
+
+                if use_cached_attn:
+                    from .acceleration.tensorrt.models.attention_processors import CachedSTAttnProcessor2_0
+                    from diffusers.models.attention_processor import AttnProcessor2_0
+                    processors = stream.unet.attn_processors
+                    for name, processor in processors.items():
+                        if isinstance(processor, AttnProcessor2_0):
+                            processor = CachedSTAttnProcessor2_0()
+                            processors[name] = processor
+                    stream.unet.set_attn_processor(processors)
 
                 # Compile VAE decoder engine using EngineManager
                 vae_decoder_model = VAE(
