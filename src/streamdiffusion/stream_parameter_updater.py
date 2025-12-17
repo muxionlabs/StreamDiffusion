@@ -254,20 +254,51 @@ class StreamParameterUpdater(OrchestratorUser):
         image_postprocessing_config: Optional[List[Dict[str, Any]]] = None,
         latent_preprocessing_config: Optional[List[Dict[str, Any]]] = None,
         latent_postprocessing_config: Optional[List[Dict[str, Any]]] = None,
+        cache_maxframes: Optional[int] = None,
+        cache_interval: Optional[int] = None,
     ) -> None:
         """Update streaming parameters efficiently in a single call."""
 
         with self._update_lock:
-            if t_index_list is not None:
-                self._recalculate_timestep_dependent_params(t_index_list)
-                
+            # First, update num_inference_steps if needed (this changes the timesteps array size)
             if num_inference_steps is not None:
+                # Safety check: Ensure num_inference_steps is at least as large as max t_index value
+                if t_index_list is None:
+                    # Check against current t_list
+                    max_t_index = max(self.stream.t_list) if self.stream.t_list else 0
+                    if num_inference_steps <= max_t_index:
+                        logger.warning(
+                            f"update_stream_params: num_inference_steps ({num_inference_steps}) is too small for "
+                            f"current t_list (max index: {max_t_index}). Adjusting to {max_t_index + 1}."
+                        )
+                        num_inference_steps = max_t_index + 1
+                else:
+                    # Check against provided t_index_list
+                    max_t_index = max(t_index_list) if t_index_list else 0
+                    if num_inference_steps <= max_t_index:
+                        logger.warning(
+                            f"update_stream_params: num_inference_steps ({num_inference_steps}) is too small for "
+                            f"provided t_index_list (max index: {max_t_index}). Adjusting to {max_t_index + 1}."
+                        )
+                        num_inference_steps = max_t_index + 1
+                
+                old_num_steps = len(self.stream.timesteps)
                 self.stream.scheduler.set_timesteps(num_inference_steps, self.stream.device)
                 self.stream.timesteps = self.stream.scheduler.timesteps.to(self.stream.device)
-
-            if num_inference_steps is not None and t_index_list is None:
-                max_step = num_inference_steps - 1
-                t_index_list = [min(t, max_step) for t in self.stream.t_list]
+                
+                # If t_index_list wasn't explicitly provided, rescale existing t_list proportionally
+                if t_index_list is None and old_num_steps > 0:
+                    # Rescale each index proportionally to the new number of steps
+                    # e.g., if t_list = [0, 16, 32, 45] with 50 steps -> [0, 3, 6, 8] with 9 steps
+                    scale_factor = (num_inference_steps - 1) / (old_num_steps - 1) if old_num_steps > 1 else 1.0
+                    t_index_list = [
+                        min(round(t * scale_factor), num_inference_steps - 1) 
+                        for t in self.stream.t_list
+                    ]
+            
+            # Now update timestep-dependent parameters with the correct t_index_list
+            if t_index_list is not None:
+                self._recalculate_timestep_dependent_params(t_index_list)
 
             if guidance_scale is not None:
                 if self.stream.cfg_type == "none" and guidance_scale > 1.0:
@@ -331,6 +362,34 @@ class StreamParameterUpdater(OrchestratorUser):
             if latent_postprocessing_config is not None:
                 logger.info(f"update_stream_params: Updating latent postprocessing configuration")
                 self._update_hook_config('latent_postprocessing', latent_postprocessing_config)
+
+            if self.stream.kvo_cache:
+                if cache_interval is not None:
+                    self.stream.cache_interval = cache_interval
+                    logger.info(f"update_stream_params: Cache interval set to {cache_interval}")
+
+                if cache_maxframes is not None:
+                    old_cache_maxframes = self.stream.cache_maxframes
+                    self.stream.cache_maxframes = cache_maxframes
+                    if old_cache_maxframes != cache_maxframes:
+                        for i, cache_tensor in enumerate(self.stream.kvo_cache):
+                            current_shape = cache_tensor.shape
+                            new_shape = (current_shape[0], cache_maxframes, current_shape[2], current_shape[3], current_shape[4])
+                            new_cache_tensor = torch.zeros(
+                                new_shape,
+                                dtype=cache_tensor.dtype,
+                                device=cache_tensor.device
+                            )
+                    
+                            if cache_maxframes > old_cache_maxframes:
+                                new_cache_tensor[:, :old_cache_maxframes] = cache_tensor
+                            else:
+                                new_cache_tensor[:, :] = cache_tensor[:, -cache_maxframes:]
+                            
+                            self.stream.kvo_cache[i] = new_cache_tensor
+                        logger.info(f"update_stream_params: Cache maxframes updated from {old_cache_maxframes} to {cache_maxframes}, kvo_cache tensors resized")
+                    else:
+                        logger.info(f"update_stream_params: Cache maxframes set to {cache_maxframes}")
 
     @torch.no_grad()
     def update_prompt_weights(
@@ -674,6 +733,20 @@ class StreamParameterUpdater(OrchestratorUser):
         # Reset stock_noise to match the new init_noise
         self.stream.stock_noise = torch.zeros_like(self.stream.init_noise)
 
+    def _get_scheduler_scalings(self, timestep):
+        """Get LCM/TCD-specific scaling factors for boundary conditions."""
+        from diffusers import LCMScheduler
+        if isinstance(self.stream.scheduler, LCMScheduler):
+            c_skip, c_out = self.stream.scheduler.get_scalings_for_boundary_condition_discrete(timestep)
+            return c_skip, c_out
+        else:
+            # TCD and other schedulers don't use boundary condition scaling like LCM
+            # They handle scaling internally in their step() method
+            # Return tensors that are compatible with torch.stack()
+            c_skip = torch.tensor(1.0, device=self.stream.device, dtype=self.stream.dtype)
+            c_out = torch.tensor(1.0, device=self.stream.device, dtype=self.stream.dtype)
+            return c_skip, c_out
+
     def _update_timestep_calculations(self) -> None:
         """Update timestep-dependent calculations based on current t_list."""
         self.stream.sub_timesteps = []
@@ -692,7 +765,7 @@ class StreamParameterUpdater(OrchestratorUser):
         c_skip_list = []
         c_out_list = []
         for timestep in self.stream.sub_timesteps:
-            c_skip, c_out = self.stream.scheduler.get_scalings_for_boundary_condition_discrete(timestep)
+            c_skip, c_out = self._get_scheduler_scalings(timestep)
             c_skip_list.append(c_skip)
             c_out_list.append(c_out)
 
@@ -1435,16 +1508,32 @@ class StreamParameterUpdater(OrchestratorUser):
             if i < len(hook_module.processors):
                 # Modify existing processor
                 existing_processor = hook_module.processors[i]
-                current_type = existing_processor.__class__.__name__
+                
+                # Get the current processor type from registry name if available, otherwise use class name
+                current_type = existing_processor.params.get('_registry_name') if hasattr(existing_processor, 'params') else None
+                if not current_type:
+                    current_type = existing_processor.__class__.__name__
                 
                 logger.info(f"_update_hook_config: Modifying existing processor {i}: {current_type} -> {processor_type}")
                 
                 # If processor type changed, replace it
-                if current_type.lower() != processor_type.lower() and not current_type.lower().startswith(processor_type.lower()):
+                if current_type.lower() != processor_type.lower():
                     logger.info(f"_update_hook_config: Type changed, replacing processor {i}")
                     try:
                         from streamdiffusion.preprocessing.processors import get_preprocessor
-                        new_processor = get_preprocessor(processor_type)
+                        
+                        # Determine normalization context from hook type
+                        if 'latent' in hook_type:
+                            normalization_context = 'latent'
+                        else:
+                            # Image preprocessing/postprocessing uses 'pipeline' context
+                            normalization_context = 'pipeline'
+                        
+                        new_processor = get_preprocessor(
+                            processor_type, 
+                            pipeline_ref=getattr(self, 'stream', None),
+                            normalization_context=normalization_context
+                        )
                         
                         # Copy attributes from old processor
                         setattr(new_processor, 'order', getattr(existing_processor, 'order', i))

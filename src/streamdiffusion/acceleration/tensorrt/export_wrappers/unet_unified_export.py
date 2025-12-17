@@ -3,6 +3,7 @@ from diffusers import UNet2DConditionModel
 from typing import Optional, List
 from .unet_controlnet_export import create_controlnet_wrapper
 from .unet_ipadapter_export import create_ipadapter_wrapper
+from ..models.utils import convert_list_to_structure
 
 class UnifiedExportWrapper(torch.nn.Module):
     """
@@ -15,6 +16,7 @@ class UnifiedExportWrapper(torch.nn.Module):
                  use_ipadapter: bool = False,
                  control_input_names: Optional[List[str]] = None,
                  num_tokens: int = 4,
+                 kvo_cache_structure: List[int] = [],
                  **kwargs):
         super().__init__()
         self.use_controlnet = use_controlnet
@@ -22,6 +24,7 @@ class UnifiedExportWrapper(torch.nn.Module):
         self.controlnet_wrapper = None
         self.ipadapter_wrapper = None
         self.unet = unet
+        self.kvo_cache_structure = kvo_cache_structure
         
         # Apply IPAdapter first (installs processors into UNet)
         if use_ipadapter:
@@ -37,40 +40,43 @@ class UnifiedExportWrapper(torch.nn.Module):
         if use_controlnet and control_input_names:
             controlnet_kwargs = {k: v for k, v in kwargs.items() if k in ['num_controlnets', 'conditioning_scales']}
 
-            self.controlnet_wrapper = create_controlnet_wrapper(self.unet, control_input_names, **controlnet_kwargs)
+            self.controlnet_wrapper = create_controlnet_wrapper(self.unet, control_input_names, kvo_cache_structure, **controlnet_kwargs)
         
-        # Set up forward strategy based on what we created
-        if self.controlnet_wrapper:
-            self._forward_impl = self.controlnet_wrapper
-        else:
-            self._forward_impl = self._basic_unet_forward
-        
-    def _basic_unet_forward(self, sample, timestep, encoder_hidden_states, *control_args, **kwargs):
+    def _basic_unet_forward(self, sample, timestep, encoder_hidden_states, *kvo_cache, **kwargs):
         """Basic UNet forward that passes through all parameters to handle any model type"""
+        formatted_kvo_cache = []
+        if len(kvo_cache) > 0:
+            formatted_kvo_cache = convert_list_to_structure(kvo_cache, self.kvo_cache_structure)
+
         unet_kwargs = {
             'sample': sample,
             'timestep': timestep,
             'encoder_hidden_states': encoder_hidden_states,
             'return_dict': False,
+            'kvo_cache': formatted_kvo_cache,
             **kwargs  # Pass through all additional parameters (SDXL, future model types, etc.)
         }
-        return self.unet(**unet_kwargs)
+        res = self.unet(**unet_kwargs)
+        if len(kvo_cache) > 0:
+            return res
+        else:
+            return res[0]
         
     def forward(self, 
                 sample: torch.Tensor,
                 timestep: torch.Tensor, 
                 encoder_hidden_states: torch.Tensor,
-                *control_args,
+                *args,
                 **kwargs) -> torch.Tensor:
         """Forward pass that handles any UNet parameters via **kwargs passthrough"""
         # Handle IP-Adapter runtime scale vector as a positional argument placed before control tensors
         if self.use_ipadapter and self.ipadapter_wrapper is not None:
             # ipadapter_scale is appended as the first extra positional input after the 3 base inputs
-            if len(control_args) == 0:
+            if len(args) == 0:
                 import logging
                 logging.getLogger(__name__).error("UnifiedExportWrapper: ipadapter_scale missing; required when use_ipadapter=True")
                 raise RuntimeError("UnifiedExportWrapper: ipadapter_scale tensor is required when use_ipadapter=True")
-            ipadapter_scale = control_args[0]
+            ipadapter_scale = args[0]
             if not isinstance(ipadapter_scale, torch.Tensor):
                 import logging
                 logging.getLogger(__name__).error(f"UnifiedExportWrapper: ipadapter_scale wrong type: {type(ipadapter_scale)}")
@@ -83,21 +89,11 @@ class UnifiedExportWrapper(torch.nn.Module):
             # assign per-layer scale tensors into processors
             self.ipadapter_wrapper.set_ipadapter_scale(ipadapter_scale)
             # remove it from control args before passing to controlnet wrapper
-            control_args = control_args[1:]
+            args = args[1:]
 
         if self.controlnet_wrapper:
             # ControlNet wrapper handles the UNet call with all parameters
-            return self.controlnet_wrapper(sample, timestep, encoder_hidden_states, *control_args, **kwargs)
+            return self.controlnet_wrapper(sample, timestep, encoder_hidden_states, *args, **kwargs)
         else:
             # Basic UNet call with all parameters passed through
-            return self._basic_unet_forward(sample, timestep, encoder_hidden_states, *control_args, **kwargs)
-            
-def create_conditioning_wrapper(unet: UNet2DConditionModel, 
-                              use_controlnet: bool = False, 
-                              use_ipadapter: bool = False,
-                              control_input_names: Optional[List[str]] = None,
-                              num_tokens: int = 4,
-                              **kwargs) -> UnifiedExportWrapper:
-    return UnifiedExportWrapper(
-        unet, use_controlnet, use_ipadapter, control_input_names, num_tokens, **kwargs
-    ) 
+            return self._basic_unet_forward(sample, timestep, encoder_hidden_states, *args, **kwargs) 
