@@ -84,7 +84,7 @@ extras["xformers"] = deps_list("xformers")
 extras["torch"] = deps_list("torch", "accelerate")
 extras["tensorrt"] = deps_list("protobuf", "cuda-python", "onnx", "onnxruntime", "onnxruntime-gpu", "colored", "polygraphy", "onnx-graphsurgeon")
 extras["controlnet"] = deps_list("onnx-graphsurgeon", "controlnet-aux")
-extras["ipadapter"] = deps_list("diffusers-ipadapter", "mediapipe", "insightface")
+extras["ipadapter"] = deps_list("diffusers-ipadapter", "insightface")
 
 extras["dev"] = extras["xformers"] + extras["torch"] + extras["tensorrt"] + extras["controlnet"]
 
