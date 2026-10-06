@@ -49,7 +49,7 @@ if any(cmd in sys.argv for cmd in ("install", "develop")):
 _deps = [
     f"cuda-python{get_cuda_constraint()}",
     "xformers==0.0.30",
-    "diffusers @ git+https://github.com/varshith15/diffusers.git@3e3b72f557e91546894340edabc845e894f00922",
+    "diffusers>=0.39.0",
     "transformers==4.56.0",
     "accelerate==1.10.0",
     "huggingface_hub==0.35.0",
@@ -60,13 +60,13 @@ _deps = [
     "onnxruntime==1.23.2",
     "onnxruntime-gpu==1.23.2",
     "polygraphy==0.49.24",
-    "protobuf==4.25.3",
+    "protobuf>=6.31.1",
     "colored==2.2.4",
     "pywin32==306;sys_platform == 'win32'",
     "onnx-graphsurgeon==0.5.8",
     "controlnet-aux==0.0.10",
     "diffusers-ipadapter @ git+https://github.com/livepeer/Diffusers_IPAdapter.git@405f87da42932e30bd55ee8dca3ce502d7834a99",
-    "mediapipe==0.10.21",
+    # mediapipe==0.10.21 requires protobuf<5 and cannot install next to protobuf>=6.31.1.
     "insightface==0.7.3",
     # We can't really pin torch version as it depends on CUDA, but we check if it's pre-installed above
     "torch",
